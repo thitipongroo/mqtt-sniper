@@ -1,6 +1,12 @@
 [package]
 name = "mqtt-sniper"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [dependencies]
+# Tokio สำหรับทำ Async หลักแสนคอนเนคชั่น
+tokio = { version = "1.34", features = ["full"] }
+# ไลบรารี MQTT ที่เร็วที่สุดของ Rust
+rumqttc = "0.24.0"
+# ไลบรารีสำหรับสร้าง CLI สวยๆ
+clap = { version = "4.4", features = ["derive"] }
