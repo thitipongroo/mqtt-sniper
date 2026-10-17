@@ -9,6 +9,7 @@ When building enterprise IoT platforms, testing the ingestion boundary is critic
 MQTT Sniper leverages **Rust** and the **Tokio async runtime** to deliver extreme throughput (msgs/sec) with a near-zero memory footprint. It ensures that your load tester is never the bottleneck.
 
 ## ⚡ Features
+
 - **High Concurrency**: Spawns thousands of independent MQTT clients in milliseconds using Tokio light-weight tasks.
 - **Fearless Performance**: Zero garbage collection pauses, ensuring accurate throughput measurement.
 - **Plug-and-Play**: Compiled to a single native binary, no external runtimes (like JVM or Node) required.
@@ -16,5 +17,59 @@ MQTT Sniper leverages **Rust** and the **Tokio async runtime** to deliver extrem
 ## 🛠️ Installation & Usage
 
 Build from source:
+
 ```bash
 cargo build --release
+```
+
+### Quick Start
+
+Run with default settings (`localhost:1883`, 100 clients, 10 messages per client):
+
+```bash
+./target/release/mqtt-sniper
+```
+
+Stress-test with custom parameters (e.g., 1,000 clients sending 50 messages each with QoS 1):
+
+```bash
+./target/release/mqtt-sniper \
+  --broker 127.0.0.1 \
+  --port 1883 \
+  --clients 1000 \
+  --messages 50 \
+  --topic "sensor/telemetry" \
+  --qos 1
+```
+
+### ⚙️ CLI Options
+
+| Flag | Short | Default | Description |
+| :--- | :---: | :---: | :--- |
+| `--broker` | `-b` | `localhost` | Target MQTT broker hostname or IP address |
+| `--port` | `-p` | `1883` | Target MQTT broker TCP port |
+| `--clients` | `-c` | `100` | Number of concurrent simulated IoT clients |
+| `--messages` | `-m` | `10` | Number of messages published per client |
+| `--topic` | `-t` | `sensor/sniper` | MQTT topic to publish messages to |
+| `--qos` | `-q` | `0` | MQTT Quality of Service level (`0`, `1`, or `2`) |
+| `--help` | `-h` | - | Print help information |
+| `--version` | `-V` | - | Print version information |
+
+### 📦 Payload Format
+
+Each client (`sniper-client-{i}`) publishes JSON payloads to the target topic:
+
+```json
+{"device_id": 0, "seq": 0}
+```
+
+### 📊 Example Output
+
+```text
+🚀 Starting MQTT Sniper...
+Broker: tcp://localhost:1883
+Spawning 1000 concurrent clients (50 msgs/client, QoS 0)...
+✅ Load test completed in 1.42s
+📊 Total messages sent: 50000 / 50000 (Failed clients: 0)
+⚡ Throughput: 35211.27 msgs/sec
+```
