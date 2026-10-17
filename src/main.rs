@@ -189,3 +189,27 @@ async fn main() {
         (actual_sent as f64) / elapsed.as_secs_f64()
     );
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_qos() {
+        assert_eq!(parse_qos(0), QoS::AtMostOnce);
+        assert_eq!(parse_qos(1), QoS::AtLeastOnce);
+        assert_eq!(parse_qos(2), QoS::ExactlyOnce);
+        assert_eq!(parse_qos(99), QoS::AtMostOnce);
+    }
+
+    #[test]
+    fn test_cli_default_args() {
+        let args = Args::parse_from(["mqtt-sniper"]);
+        assert_eq!(args.broker, "localhost");
+        assert_eq!(args.port, 1883);
+        assert_eq!(args.clients, 100);
+        assert_eq!(args.messages, 10);
+        assert_eq!(args.topic, "sensor/sniper");
+        assert_eq!(args.qos, 0);
+    }
+}
