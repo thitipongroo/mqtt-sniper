@@ -1,5 +1,10 @@
 # 🎯 MQTT Sniper
 
+[![Crates.io Version](https://img.shields.io/crates/v/mqtt-sniper?style=flat&logo=rust)](https://crates.io/crates/mqtt-sniper)
+[![Crates.io Downloads](https://img.shields.io/crates/d/mqtt-sniper?style=flat&color=28a745)](https://crates.io/crates/mqtt-sniper)
+[![CI Status](https://github.com/thitipongroo/mqtt-sniper/actions/workflows/ci.yml/badge.svg)](https://github.com/thitipongroo/mqtt-sniper/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 A blazing-fast, memory-efficient MQTT load testing CLI written in Rust. Designed to stress-test enterprise IoT architectures by spawning thousands of concurrent asynchronous clients.
 
 ## 🚀 Why MQTT Sniper?
@@ -20,6 +25,19 @@ Build from source:
 
 ```bash
 cargo build --release
+```
+
+Cargo:
+
+```bash
+cargo install mqtt-sniper
+```
+
+Docker:
+
+```bash
+docker build -t mqtt-sniper .
+docker run --rm mqtt-sniper --broker host.docker.internal --clients 500
 ```
 
 ### Quick Start
@@ -73,3 +91,7 @@ Spawning 1000 concurrent clients (50 msgs/client, QoS 0)...
 📊 Total messages sent: 50000 / 50000 (Failed clients: 0)
 ⚡ Throughput: 35211.27 msgs/sec
 ```
+
+## 🔗 Related Projects in the Ecosystem
+
+- **[mqtt-mock-sensor](https://github.com/thitipongroo/mqtt-mock-sensor)**: Need realistic IoT sensor telemetry (GPS, Env, Power), anomaly injection, or bi-directional Device Shadow testing? Check out our zero-config Node.js simulator (`npx mqtt-mock-sensor`).
