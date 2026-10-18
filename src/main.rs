@@ -5,17 +5,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::task;
 
-// 1. สร้าง Struct สำหรับรับค่าจาก Command Line
+// 1. CLI argument parsing structure
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Blazing fast MQTT Load Tester")]
 struct Args {
     /// Target MQTT broker hostname or IP address
-    #[arg(
-        short,
-        long,
-        default_value = "localhost",
-        help = "Target MQTT broker hostname or IP address"
-    )]
+    #[arg(short, long, default_value = "localhost")]
     broker: String,
 
     /// Target MQTT broker TCP port
@@ -24,11 +19,11 @@ struct Args {
 
     /// Number of concurrent simulated IoT clients
     #[arg(short, long, default_value_t = 100)]
-    clients: usize, // จำนวนอุปกรณ์ IoT จำลอง
+    clients: usize,
 
     /// Number of messages published per client
     #[arg(short, long, default_value_t = 10)]
-    messages: usize, // จำนวนข้อความต่อ 1 อุปกรณ์
+    messages: usize,
 
     /// MQTT topic to publish messages to (supports {device_id})
     #[arg(short, long, default_value = "sensor/sniper")]
@@ -36,26 +31,26 @@ struct Args {
 
     /// MQTT Quality of Service level (0 = AtMostOnce, 1 = AtLeastOnce, 2 = ExactlyOnce)
     #[arg(short, long, default_value_t = 0, value_parser = clap::value_parser!(u8).range(0..=2))]
-    qos: u8, // ระดับ QoS (0 = AtMostOnce, 1 = AtLeastOnce, 2 = ExactlyOnce)
+    qos: u8,
 
     /// Delay (ms) before spawning consecutive clients (prevents TCP SYN flood)
     #[arg(long, default_value_t = 0)]
-    ramp_up_ms: u64, // หน่วงเวลา (ms) ก่อนสร้าง Client ตัวถัดไป (ป้องกัน TCP SYN Flood)
+    ramp_up_ms: u64,
 
     /// Delay (ms) between consecutive messages from the same client
     #[arg(short, long, default_value_t = 0)]
-    interval_ms: u64, // หน่วงเวลา (ms) ระหว่างการส่งแต่ละข้อความของอุปกรณ์เดียวกัน
+    interval_ms: u64,
 
     /// Custom payload template (supports {device_id}, {seq}, {timestamp})
     #[arg(
         long,
         default_value = r#"{"device_id": {device_id}, "seq": {seq}, "ts": {timestamp}}"#
     )]
-    payload: String, // รูปแบบข้อความ (รองรับตัวแปร {device_id}, {seq}, {timestamp})
+    payload: String,
 
     /// Minimum payload size in bytes (padded with 'x' if shorter)
     #[arg(long, default_value_t = 0)]
-    payload_size: usize, // บังคับขนาด Payload ขั้นต่ำ (Bytes) ถ้าระบุ > 0 จะเติมข้อมูลให้ครบขนาด
+    payload_size: usize,
 
     /// Username for MQTT broker authentication
     #[arg(short, long)]
@@ -80,13 +75,13 @@ fn build_payload(template: &str, device_id: usize, seq: usize, min_size: usize) 
         .unwrap_or_default()
         .as_millis();
 
-    // แทนที่ Placeholder ใน Template ด้วยค่าจริง
+    // Replace placeholders in template with dynamic values
     let mut rendered = template
         .replace("{device_id}", &device_id.to_string())
         .replace("{seq}", &seq.to_string())
         .replace("{timestamp}", &timestamp.to_string());
 
-    // หากผู้ใช้กำหนด --payload-size ให้เติมตัวอักษร 'x' จนได้ขนาด Bytes ตามต้องการ
+    // Pad payload with 'x' bytes if minimum size is requested
     if min_size > rendered.len() {
         let padding_len = min_size - rendered.len();
         rendered.push_str(&"x".repeat(padding_len));
@@ -95,7 +90,7 @@ fn build_payload(template: &str, device_id: usize, seq: usize, min_size: usize) 
     rendered.into_bytes()
 }
 
-// 2. ฟังก์ชันหลัก (ครอบด้วย tokio::main เพื่อให้รัน Async ได้)
+// 2. Main entry point (wrapped in tokio async runtime)
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
@@ -117,9 +112,9 @@ async fn run_load_test(args: Args) -> (Duration, usize, usize) {
     let published_count = Arc::new(AtomicUsize::new(0));
     let failed_clients = Arc::new(AtomicUsize::new(0));
 
-    // 3. วนลูปสร้าง Client แบบ "พร้อมกัน" (Concurrent Tasks)
+    // 3. Spawn concurrent client tasks
     for i in 0..args.clients {
-        // ถ้าระบุ --ramp-up-ms มา ให้หน่วงเวลาก่อน spawn Client ตัวถัดไป
+        // Apply ramp-up delay before spawning the next client if configured
         if args.ramp_up_ms > 0 && i > 0 {
             tokio::time::sleep(Duration::from_millis(args.ramp_up_ms)).await;
         }
@@ -136,7 +131,7 @@ async fn run_load_test(args: Args) -> (Duration, usize, usize) {
         let published_counter = Arc::clone(&published_count);
         let failed_counter = Arc::clone(&failed_clients);
 
-        // แยก Task ทำงานอิสระ (เหมือน Goroutine ใน Go)
+        // Spawn independent task for each simulated client
         let handle = task::spawn(async move {
             let client_id = format!("sniper-client-{}", i);
             let mut mqttoptions = MqttOptions::new(client_id, broker, port);
@@ -149,7 +144,7 @@ async fn run_load_test(args: Args) -> (Duration, usize, usize) {
             let (client, mut eventloop) = AsyncClient::new(mqttoptions, 50);
             let client_clone = client.clone();
 
-            // สาดข้อความ (Publish) ใน Task ย่อย เพื่อส่งคำสั่งเข้า Channel
+            // Publish messages asynchronously to the client's request channel
             let publisher = tokio::spawn(async move {
                 for j in 0..messages {
                     let payload_bytes = build_payload(&payload_template, i, j, payload_size);
@@ -164,15 +159,15 @@ async fn run_load_test(args: Args) -> (Duration, usize, usize) {
                         tokio::time::sleep(Duration::from_millis(interval_ms)).await;
                     }
                 }
-                // สำหรับ QoS 0 (หรือเมื่อไม่มีข้อความที่ต้องส่ง) สั่ง disconnect ได้ทันทีเมื่อส่งเข้า channel ครบ
+                // For QoS 0 (or when 0 messages), disconnect immediately once all messages are queued
                 if qos == QoS::AtMostOnce || messages == 0 {
                     let _ = client.disconnect().await;
                 }
             });
 
-            // ต้องมี Loop ดึง Event ออกมา (กฎของ rumqttc)
-            // สำหรับ QoS 0: รอจนกว่าจะส่งคำสั่ง Disconnect ออกทาง TCP
-            // สำหรับ QoS 1/2: รอรับ PUBACK / PUBCOMP ให้ครบทุกข้อความก่อนสั่ง Disconnect
+            // Poll eventloop to drive network I/O:
+            // - For QoS 0: wait until Disconnect is flushed out
+            // - For QoS 1/2: wait for all PUBACK / PUBCOMP acknowledgments before disconnecting
             let mut acked_count = 0usize;
             loop {
                 match eventloop.poll().await {
@@ -214,15 +209,15 @@ async fn run_load_test(args: Args) -> (Duration, usize, usize) {
             let _ = publisher.await;
         });
 
-        handles.push(handle); // เก็บ Task ไว้รอดูตอนจบ
+        handles.push(handle);
     }
 
-    // 4. รอให้ทุก Client ยิงเสร็จ
+    // 4. Await completion of all client tasks
     for handle in handles {
         let _ = handle.await;
     }
 
-    // 5. สรุปผล
+    // 5. Calculate and print benchmark summary
     let elapsed = start_time.elapsed();
     let target_messages = args.clients * args.messages;
     let actual_sent = published_count.load(Ordering::Relaxed);
