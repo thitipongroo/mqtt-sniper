@@ -1,4 +1,4 @@
-use crate::cli::Args;
+use crate::cli::{Args, Mode};
 use hdrhistogram::Histogram;
 use serde::Serialize;
 use std::fs;
@@ -8,6 +8,8 @@ use std::time::Duration;
 pub struct BenchmarkReport {
     pub broker: String,
     pub port: u16,
+    pub mode: Mode,
+    pub tls: bool,
     pub clients: usize,
     pub messages_per_client: usize,
     pub qos: u8,
@@ -53,9 +55,13 @@ impl BenchmarkReport {
             (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
         };
 
+        let use_tls = args.tls || args.ca.is_some() || args.cert.is_some() || args.key.is_some();
+
         Self {
             broker: args.broker.clone(),
             port: args.port,
+            mode: args.mode,
+            tls: use_tls,
             clients: args.clients,
             messages_per_client: args.messages,
             qos: args.qos,
@@ -74,10 +80,14 @@ impl BenchmarkReport {
     }
 
     pub fn print_summary(&self, elapsed: Duration) {
+        let action_label = match self.mode {
+            Mode::Pub => "sent",
+            Mode::Sub => "received",
+        };
         println!("✅ Load test completed in {:.2?}", elapsed);
         println!(
-            "📊 Total messages sent: {} / {} (Failed clients: {})",
-            self.actual_sent, self.target_messages, self.failed_clients
+            "📊 Total messages {}: {} / {} (Failed clients: {})",
+            action_label, self.actual_sent, self.target_messages, self.failed_clients
         );
         if self.elapsed_secs > 0.0 {
             println!(

@@ -1,5 +1,18 @@
-use clap::Parser;
-use rumqttc::QoS;
+use clap::{Parser, ValueEnum};
+use rumqttc::{QoS, Transport};
+use serde::Serialize;
+use std::fs;
+
+/// Benchmark operation mode
+#[derive(ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Mode {
+    /// Publish messages to the broker
+    #[default]
+    Pub,
+    /// Subscribe to topics and receive messages from the broker
+    Sub,
+}
 
 /// CLI argument parsing structure
 #[derive(Parser, Debug, Clone)]
@@ -13,15 +26,23 @@ pub struct Args {
     #[arg(short, long, default_value_t = 1883)]
     pub port: u16,
 
+    /// Benchmark mode: 'pub' (publish) or 'sub' (subscribe)
+    #[arg(long, value_enum, default_value_t = Mode::Pub)]
+    pub mode: Mode,
+
     /// Number of concurrent simulated IoT clients
     #[arg(short, long, default_value_t = 100)]
     pub clients: usize,
 
-    /// Number of messages published per client
+    /// Maximum number of active concurrent connections (0 = unlimited)
+    #[arg(long, default_value_t = 0)]
+    pub max_connections: usize,
+
+    /// Number of messages published (or received in 'sub' mode) per client
     #[arg(short, long, default_value_t = 10)]
     pub messages: usize,
 
-    /// MQTT topic to publish messages to (supports {device_id})
+    /// MQTT topic to publish or subscribe to (supports {device_id})
     #[arg(short, long, default_value = "sensor/sniper")]
     pub topic: String,
 
@@ -56,6 +77,22 @@ pub struct Args {
     #[arg(long)]
     pub password: Option<String>,
 
+    /// Enable SSL/TLS connection (mqtts://)
+    #[arg(long, default_value_t = false)]
+    pub tls: bool,
+
+    /// Path to custom CA certificate file (PEM) for TLS verification
+    #[arg(long)]
+    pub ca: Option<String>,
+
+    /// Path to client certificate file (PEM) for mTLS authentication
+    #[arg(long)]
+    pub cert: Option<String>,
+
+    /// Path to client private key file (PEM) for mTLS authentication
+    #[arg(long)]
+    pub key: Option<String>,
+
     /// Export benchmark results to a JSON file
     #[arg(long)]
     pub output_json: Option<String>,
@@ -66,6 +103,39 @@ pub fn parse_qos(qos: u8) -> QoS {
         1 => QoS::AtLeastOnce,
         2 => QoS::ExactlyOnce,
         _ => QoS::AtMostOnce,
+    }
+}
+
+pub fn build_transport(args: &Args) -> Result<Transport, String> {
+    let use_tls = args.tls || args.ca.is_some() || args.cert.is_some() || args.key.is_some();
+    if !use_tls {
+        return Ok(Transport::Tcp);
+    }
+
+    let client_auth = match (&args.cert, &args.key) {
+        (Some(cert_path), Some(key_path)) => {
+            let cert_bytes = fs::read(cert_path)
+                .map_err(|e| format!("Failed to read client cert '{}': {}", cert_path, e))?;
+            let key_bytes = fs::read(key_path)
+                .map_err(|e| format!("Failed to read client key '{}': {}", key_path, e))?;
+            Some((cert_bytes, key_bytes))
+        }
+        (Some(_), None) | (None, Some(_)) => {
+            return Err(
+                "Both --cert and --key must be provided for mTLS authentication".to_string(),
+            );
+        }
+        (None, None) => None,
+    };
+
+    if let Some(ref ca_path) = args.ca {
+        let ca_bytes = fs::read(ca_path)
+            .map_err(|e| format!("Failed to read CA cert '{}': {}", ca_path, e))?;
+        Ok(Transport::tls(ca_bytes, client_auth, None))
+    } else if client_auth.is_some() {
+        Err("Custom --ca certificate is required when using --cert and --key for mTLS".to_string())
+    } else {
+        Ok(Transport::tls_with_default_config())
     }
 }
 
@@ -86,7 +156,9 @@ mod tests {
         let args = Args::parse_from(["mqtt-sniper"]);
         assert_eq!(args.broker, "localhost");
         assert_eq!(args.port, 1883);
+        assert_eq!(args.mode, Mode::Pub);
         assert_eq!(args.clients, 100);
+        assert_eq!(args.max_connections, 0);
         assert_eq!(args.messages, 10);
         assert_eq!(args.topic, "sensor/sniper");
         assert_eq!(args.qos, 0);
@@ -99,6 +171,10 @@ mod tests {
         assert_eq!(args.payload_size, 0);
         assert_eq!(args.username, None);
         assert_eq!(args.password, None);
+        assert!(!args.tls);
+        assert_eq!(args.ca, None);
+        assert_eq!(args.cert, None);
+        assert_eq!(args.key, None);
         assert_eq!(args.output_json, None);
     }
 
@@ -109,9 +185,13 @@ mod tests {
             "-b",
             "10.0.0.1",
             "-p",
-            "1884",
+            "8883",
+            "--mode",
+            "sub",
             "-c",
             "50",
+            "--max-connections",
+            "25",
             "-m",
             "20",
             "-t",
@@ -130,12 +210,21 @@ mod tests {
             "myuser",
             "--password",
             "mypass",
+            "--tls",
+            "--ca",
+            "ca.pem",
+            "--cert",
+            "client.crt",
+            "--key",
+            "client.key",
             "--output-json",
             "report.json",
         ]);
         assert_eq!(args.broker, "10.0.0.1");
-        assert_eq!(args.port, 1884);
+        assert_eq!(args.port, 8883);
+        assert_eq!(args.mode, Mode::Sub);
         assert_eq!(args.clients, 50);
+        assert_eq!(args.max_connections, 25);
         assert_eq!(args.messages, 20);
         assert_eq!(args.topic, "test/topic/{device_id}");
         assert_eq!(args.qos, 2);
@@ -145,6 +234,22 @@ mod tests {
         assert_eq!(args.payload_size, 64);
         assert_eq!(args.username, Some("myuser".to_string()));
         assert_eq!(args.password, Some("mypass".to_string()));
+        assert!(args.tls);
+        assert_eq!(args.ca, Some("ca.pem".to_string()));
+        assert_eq!(args.cert, Some("client.crt".to_string()));
+        assert_eq!(args.key, Some("client.key".to_string()));
         assert_eq!(args.output_json, Some("report.json".to_string()));
+    }
+
+    #[test]
+    fn test_build_transport_validation() {
+        let mut args = Args::parse_from(["mqtt-sniper"]);
+        assert!(build_transport(&args).is_ok());
+
+        args.tls = true;
+        assert!(build_transport(&args).is_ok());
+
+        args.cert = Some("cert.pem".to_string());
+        assert!(build_transport(&args).is_err());
     }
 }

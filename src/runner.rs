@@ -1,4 +1,4 @@
-use crate::cli::{Args, parse_qos};
+use crate::cli::{Args, Mode, build_transport, parse_qos};
 use crate::payload::build_payload;
 use crate::report::BenchmarkReport;
 use hdrhistogram::Histogram;
@@ -7,19 +7,43 @@ use rumqttc::{AsyncClient, Event, MqttOptions, Outgoing, Packet, QoS};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
-use tokio::sync::mpsc;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tokio::sync::{Semaphore, mpsc};
 use tokio::task;
+
+fn extract_payload_latency_us(payload: &[u8], fallback_start: Instant) -> u64 {
+    if let Ok(val) = serde_json::from_slice::<serde_json::Value>(payload)
+        && let Some(ts_ms) = val.get("ts").and_then(|v| v.as_u64())
+    {
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        if now_ms >= ts_ms {
+            return (now_ms - ts_ms).saturating_mul(1000).max(1);
+        }
+    }
+    fallback_start.elapsed().as_micros() as u64
+}
 
 pub async fn run_load_test(args: Args) -> BenchmarkReport {
     let qos = parse_qos(args.qos);
     let target_messages = args.clients * args.messages;
+    let transport = build_transport(&args).unwrap_or_else(|err| {
+        eprintln!("❌ TLS Configuration Error: {}", err);
+        std::process::exit(1);
+    });
+    let scheme = if args.tls || args.ca.is_some() || args.cert.is_some() || args.key.is_some() {
+        "mqtts"
+    } else {
+        "tcp"
+    };
 
     println!("🚀 Starting MQTT Sniper...");
-    println!("Broker: tcp://{}:{}", args.broker, args.port);
+    println!("Broker: {}://{}:{}", scheme, args.broker, args.port);
     println!(
-        "Spawning {} concurrent clients ({} msgs/client, QoS {})...",
-        args.clients, args.messages, args.qos
+        "Spawning {} concurrent {:?} clients ({} msgs/client, QoS {})...",
+        args.clients, args.mode, args.messages, args.qos
     );
 
     let pb = ProgressBar::new(target_messages as u64);
@@ -33,6 +57,11 @@ pub async fn run_load_test(args: Args) -> BenchmarkReport {
     let mut handles = Vec::with_capacity(args.clients);
     let published_count = Arc::new(AtomicUsize::new(0));
     let failed_clients = Arc::new(AtomicUsize::new(0));
+    let semaphore = if args.max_connections > 0 {
+        Some(Arc::new(Semaphore::new(args.max_connections)))
+    } else {
+        None
+    };
 
     // Spawn concurrent client tasks
     for i in 0..args.clients {
@@ -46,19 +75,28 @@ pub async fn run_load_test(args: Args) -> BenchmarkReport {
         let payload_template = args.payload.clone();
         let payload_size = args.payload_size;
         let port = args.port;
+        let mode = args.mode;
         let messages = args.messages;
         let interval_ms = args.interval_ms;
         let username = args.username.clone();
         let password = args.password.clone();
+        let client_transport = transport.clone();
         let published_counter = Arc::clone(&published_count);
         let failed_counter = Arc::clone(&failed_clients);
         let pb_clone = pb.clone();
+        let sem_clone = semaphore.clone();
 
         // Spawn independent task for each simulated client
         let handle = task::spawn(async move {
+            let _permit = match sem_clone {
+                Some(ref sem) => sem.acquire().await.ok(),
+                None => None,
+            };
+
             let client_id = format!("sniper-client-{}", i);
             let mut mqttoptions = MqttOptions::new(client_id, broker, port);
             mqttoptions.set_keep_alive(Duration::from_secs(5));
+            mqttoptions.set_transport(client_transport);
 
             if let Some(ref user) = username {
                 mqttoptions.set_credentials(user, password.as_deref().unwrap_or(""));
@@ -68,38 +106,49 @@ pub async fn run_load_test(args: Args) -> BenchmarkReport {
             let client_clone = client.clone();
             let (tx_time, mut rx_time) = mpsc::unbounded_channel::<Instant>();
 
-            // Publish messages asynchronously to the client's request channel
-            let publisher = tokio::spawn(async move {
-                for j in 0..messages {
-                    let payload_bytes = build_payload(&payload_template, i, j, payload_size);
-                    let _ = tx_time.send(Instant::now());
-                    if client
-                        .publish(topic.as_str(), qos, false, payload_bytes)
-                        .await
-                        .is_err()
-                    {
-                        break;
+            // Worker task for Publish or Subscribe action
+            let worker = tokio::spawn(async move {
+                match mode {
+                    Mode::Pub => {
+                        for j in 0..messages {
+                            let payload_bytes =
+                                build_payload(&payload_template, i, j, payload_size);
+                            let _ = tx_time.send(Instant::now());
+                            if client
+                                .publish(topic.as_str(), qos, false, payload_bytes)
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+                            if interval_ms > 0 && j + 1 < messages {
+                                tokio::time::sleep(Duration::from_millis(interval_ms)).await;
+                            }
+                        }
+                        // For QoS 0 (or when 0 messages), disconnect immediately once all messages are queued
+                        if qos == QoS::AtMostOnce || messages == 0 {
+                            let _ = client.disconnect().await;
+                        }
                     }
-                    if interval_ms > 0 && j + 1 < messages {
-                        tokio::time::sleep(Duration::from_millis(interval_ms)).await;
+                    Mode::Sub => {
+                        if messages == 0 {
+                            let _ = client.disconnect().await;
+                        } else {
+                            let _ = client.subscribe(topic.as_str(), qos).await;
+                        }
                     }
-                }
-                // For QoS 0 (or when 0 messages), disconnect immediately once all messages are queued
-                if qos == QoS::AtMostOnce || messages == 0 {
-                    let _ = client.disconnect().await;
                 }
             });
 
-            // Poll eventloop to drive network I/O:
-            // - For QoS 0: wait until Disconnect is flushed out
-            // - For QoS 1/2: wait for all PUBACK / PUBCOMP acknowledgments before disconnecting
-            let mut acked_count = 0usize;
+            // Poll eventloop to drive network I/O
+            let mut completed_count = 0usize;
             let mut inflight: HashMap<u16, Instant> = HashMap::new();
             let mut latencies_us: Vec<u64> = Vec::with_capacity(messages);
+            let mut last_recv = Instant::now();
 
             loop {
                 match eventloop.poll().await {
-                    Ok(Event::Outgoing(Outgoing::Publish(pkid))) => {
+                    Ok(Event::Outgoing(Outgoing::Publish(pkid))) if mode == Mode::Pub => {
                         if qos == QoS::AtMostOnce {
                             if let Ok(t0) = rx_time.try_recv() {
                                 latencies_us.push(t0.elapsed().as_micros() as u64);
@@ -110,30 +159,41 @@ pub async fn run_load_test(args: Args) -> BenchmarkReport {
                             inflight.insert(pkid, t0);
                         }
                     }
-                    Ok(Event::Incoming(Packet::PubAck(ack))) => {
+                    Ok(Event::Incoming(Packet::PubAck(ack))) if mode == Mode::Pub => {
                         if qos == QoS::AtLeastOnce {
                             if let Some(t0) = inflight.remove(&ack.pkid) {
                                 latencies_us.push(t0.elapsed().as_micros() as u64);
                             }
                             published_counter.fetch_add(1, Ordering::Relaxed);
                             pb_clone.inc(1);
-                            acked_count += 1;
-                            if acked_count == messages {
+                            completed_count += 1;
+                            if completed_count == messages {
                                 let _ = client_clone.disconnect().await;
                             }
                         }
                     }
-                    Ok(Event::Incoming(Packet::PubComp(comp))) => {
+                    Ok(Event::Incoming(Packet::PubComp(comp))) if mode == Mode::Pub => {
                         if qos == QoS::ExactlyOnce {
                             if let Some(t0) = inflight.remove(&comp.pkid) {
                                 latencies_us.push(t0.elapsed().as_micros() as u64);
                             }
                             published_counter.fetch_add(1, Ordering::Relaxed);
                             pb_clone.inc(1);
-                            acked_count += 1;
-                            if acked_count == messages {
+                            completed_count += 1;
+                            if completed_count == messages {
                                 let _ = client_clone.disconnect().await;
                             }
+                        }
+                    }
+                    Ok(Event::Incoming(Packet::Publish(publish))) if mode == Mode::Sub => {
+                        let lat_us = extract_payload_latency_us(&publish.payload, last_recv);
+                        last_recv = Instant::now();
+                        latencies_us.push(lat_us);
+                        published_counter.fetch_add(1, Ordering::Relaxed);
+                        pb_clone.inc(1);
+                        completed_count += 1;
+                        if completed_count == messages {
+                            let _ = client_clone.disconnect().await;
                         }
                     }
                     Ok(Event::Outgoing(Outgoing::Disconnect)) => {
@@ -147,8 +207,8 @@ pub async fn run_load_test(args: Args) -> BenchmarkReport {
                 }
             }
 
-            publisher.abort();
-            let _ = publisher.await;
+            worker.abort();
+            let _ = worker.await;
             latencies_us
         });
 

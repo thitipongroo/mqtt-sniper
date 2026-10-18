@@ -15,7 +15,9 @@ MQTT Sniper leverages **Rust** and the **Tokio async runtime** to deliver extrem
 
 ## ⚡ Features
 
-- **High Concurrency**: Spawns thousands of independent MQTT clients in milliseconds using Tokio light-weight tasks.
+- **High Concurrency**: Spawns thousands of independent MQTT clients in milliseconds using Tokio light-weight tasks, with optional active connection limiting (`--max-connections`).
+- **Publish & Subscribe Modes**: Benchmark both ingestion (`--mode pub`) and fan-out message delivery (`--mode sub`).
+- **Enterprise Security (TLS / mTLS)**: Native support for encrypted `mqtts://` connections (`--tls`), custom CA certificates (`--ca`), and mutual TLS client certificates (`--cert`, `--key`).
 - **Fearless Performance**: Zero garbage collection pauses, ensuring accurate throughput measurement.
 - **Latency Histogram**: Tracks per-message delivery & ACK round-trip latencies (`min`, `avg`, `p50`, `p95`, `p99`, `max`) using High Dynamic Range (HDR) histograms.
 - **Live Terminal Progress**: Real-time progress bar with live throughput (`msgs/sec`) and ETA tracking.
@@ -64,13 +66,42 @@ Stress-test with custom parameters (e.g., 1,000 clients sending 50 messages each
   --output-json report.json
 ```
 
+Benchmark Fan-out Subscriber delivery (e.g., 500 subscribers each receiving 20 messages):
+
+```bash
+./target/release/mqtt-sniper \
+  --broker 127.0.0.1 \
+  --port 1883 \
+  --mode sub \
+  --clients 500 \
+  --messages 20 \
+  --topic "sensor/telemetry" \
+  --qos 1
+```
+
+Connect to an enterprise broker over SSL/TLS or Mutual TLS (mTLS):
+
+```bash
+./target/release/mqtt-sniper \
+  --broker iot.example.com \
+  --port 8883 \
+  --tls \
+  --ca certs/ca.pem \
+  --cert certs/client.crt \
+  --key certs/client.key \
+  --clients 200 \
+  --max-connections 100
+```
+
 ### ⚙️ CLI Options
 
 | Flag | Short | Default | Description |
 | :--- | :---: | :---: | :--- |
 | `--broker` | `-b` | `localhost` | Target MQTT broker hostname or IP address |
 | `--port` | `-p` | `1883` | Target MQTT broker TCP port |
+| `--mode` | - | `pub` | Benchmark mode: `pub` (publish) or `sub` (subscribe) |
 | `--clients` | `-c` | `100` | Number of concurrent simulated IoT clients |
+| `--max-connections` | - | `0` | Maximum number of active concurrent connections (0 = unlimited) |
 | `--messages` | `-m` | `10` | Number of messages published per client |
 | `--topic` | `-t` | `sensor/sniper` | MQTT topic to publish messages to (supports `{device_id}`) |
 | `--qos` | `-q` | `0` | MQTT Quality of Service level (`0`, `1`, or `2`) |
@@ -80,6 +111,10 @@ Stress-test with custom parameters (e.g., 1,000 clients sending 50 messages each
 | `--payload-size` | - | `0` | Minimum payload size in bytes (padded with `x` if rendered payload is smaller) |
 | `--username` | `-u` | - | Username for MQTT broker authentication |
 | `--password` | - | - | Password for MQTT broker authentication |
+| `--tls` | - | `false` | Enable SSL/TLS connection (mqtts://) |
+| `--ca` | - | - | Path to custom CA certificate file (PEM) for TLS verification |
+| `--cert` | - | - | Path to client certificate file (PEM) for mTLS authentication |
+| `--key` | - | - | Path to client private key file (PEM) for mTLS authentication |
 | `--output-json` | - | - | Export benchmark results to a JSON file |
 | `--help` | `-h` | - | Print help information |
 | `--version` | `-V` | - | Print version information |
@@ -105,7 +140,7 @@ Use `--payload-size` to enforce a minimum payload byte size (useful for benchmar
 ```text
 🚀 Starting MQTT Sniper...
 Broker: tcp://localhost:1883
-Spawning 1000 concurrent clients (50 msgs/client, QoS 0)...
+Spawning 1000 concurrent Pub clients (50 msgs/client, QoS 0)...
 ✅ Load test completed in 1.42s
 📊 Total messages sent: 50000 / 50000 (Failed clients: 0)
 ⚡ Throughput: 35211.27 msgs/sec

@@ -1,4 +1,4 @@
-use mqtt_sniper::cli::Args;
+use mqtt_sniper::cli::{Args, Mode};
 use mqtt_sniper::runner::run_load_test;
 use std::fs;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -45,6 +45,24 @@ async fn start_mock_broker(expected_qos: u8, expected_clients: usize) -> u16 {
                         } else if ptype == 6 {
                             // PUBREL -> Send PUBCOMP
                             let _ = socket.write_all(&[0x70, 0x02, body[0], body[1]]).await;
+                        } else if ptype == 8 {
+                            // SUBSCRIBE -> Send SUBACK and push expected QoS 0 PUBLISH packets
+                            let pkid = [body[0], body[1]];
+                            let _ = socket
+                                .write_all(&[0x90, 0x03, pkid[0], pkid[1], 0x00])
+                                .await;
+
+                            let topic = b"test/sub";
+                            let payload = br#"{"device_id": 0, "seq": 0}"#;
+                            let rem = 2 + topic.len() + payload.len();
+                            let mut pub_pkt = vec![0x30, rem as u8];
+                            pub_pkt.extend_from_slice(&(topic.len() as u16).to_be_bytes());
+                            pub_pkt.extend_from_slice(topic);
+                            pub_pkt.extend_from_slice(payload);
+
+                            for _ in 0..3 {
+                                let _ = socket.write_all(&pub_pkt).await;
+                            }
                         } else if ptype == 14 {
                             // DISCONNECT
                             break;
@@ -62,27 +80,37 @@ async fn start_mock_broker(expected_qos: u8, expected_clients: usize) -> u16 {
     port
 }
 
-#[tokio::test]
-async fn test_load_test_qos0() {
-    let clients = 2;
-    let messages = 3;
-    let port = start_mock_broker(0, clients).await;
-
-    let args = Args {
+fn default_test_args(port: u16, clients: usize, messages: usize, qos: u8, topic: &str) -> Args {
+    Args {
         broker: "127.0.0.1".to_string(),
         port,
+        mode: Mode::Pub,
         clients,
+        max_connections: 0,
         messages,
-        topic: "test/qos0".to_string(),
-        qos: 0,
+        topic: topic.to_string(),
+        qos,
         ramp_up_ms: 0,
         interval_ms: 0,
         payload: "{}".to_string(),
         payload_size: 0,
         username: None,
         password: None,
+        tls: false,
+        ca: None,
+        cert: None,
+        key: None,
         output_json: None,
-    };
+    }
+}
+
+#[tokio::test]
+async fn test_load_test_qos0() {
+    let clients = 2;
+    let messages = 3;
+    let port = start_mock_broker(0, clients).await;
+
+    let args = default_test_args(port, clients, messages, 0, "test/qos0");
 
     let report = run_load_test(args).await;
     assert_eq!(report.actual_sent, 6);
@@ -96,21 +124,7 @@ async fn test_load_test_qos1_waits_for_puback() {
     let messages = 3;
     let port = start_mock_broker(1, clients).await;
 
-    let args = Args {
-        broker: "127.0.0.1".to_string(),
-        port,
-        clients,
-        messages,
-        topic: "test/qos1".to_string(),
-        qos: 1,
-        ramp_up_ms: 0,
-        interval_ms: 0,
-        payload: "{}".to_string(),
-        payload_size: 0,
-        username: None,
-        password: None,
-        output_json: None,
-    };
+    let args = default_test_args(port, clients, messages, 1, "test/qos1");
 
     let report = run_load_test(args).await;
     assert_eq!(report.actual_sent, 6);
@@ -124,21 +138,7 @@ async fn test_load_test_qos2_waits_for_pubcomp() {
     let messages = 3;
     let port = start_mock_broker(2, clients).await;
 
-    let args = Args {
-        broker: "127.0.0.1".to_string(),
-        port,
-        clients,
-        messages,
-        topic: "test/qos2".to_string(),
-        qos: 2,
-        ramp_up_ms: 0,
-        interval_ms: 0,
-        payload: "{}".to_string(),
-        payload_size: 0,
-        username: None,
-        password: None,
-        output_json: None,
-    };
+    let args = default_test_args(port, clients, messages, 2, "test/qos2");
 
     let report = run_load_test(args).await;
     assert_eq!(report.actual_sent, 6);
@@ -154,21 +154,8 @@ async fn test_json_report_export() {
     let tmp_path = std::env::temp_dir().join("mqtt_sniper_test_report.json");
     let tmp_path_str = tmp_path.to_str().unwrap().to_string();
 
-    let args = Args {
-        broker: "127.0.0.1".to_string(),
-        port,
-        clients,
-        messages,
-        topic: "test/json".to_string(),
-        qos: 1,
-        ramp_up_ms: 0,
-        interval_ms: 0,
-        payload: "{}".to_string(),
-        payload_size: 0,
-        username: None,
-        password: None,
-        output_json: Some(tmp_path_str.clone()),
-    };
+    let mut args = default_test_args(port, clients, messages, 1, "test/json");
+    args.output_json = Some(tmp_path_str);
 
     let report = run_load_test(args).await;
     assert_eq!(report.actual_sent, 2);
@@ -178,4 +165,20 @@ async fn test_json_report_export() {
     assert!(content.contains(r#""actual_sent": 2"#));
     assert!(content.contains(r#""latency_p99_ms""#));
     let _ = fs::remove_file(&tmp_path);
+}
+
+#[tokio::test]
+async fn test_load_test_subscribe_mode_and_max_connections() {
+    let clients = 2;
+    let messages = 3;
+    let port = start_mock_broker(0, clients).await;
+
+    let mut args = default_test_args(port, clients, messages, 0, "test/sub");
+    args.mode = Mode::Sub;
+    args.max_connections = 1;
+
+    let report = run_load_test(args).await;
+    assert_eq!(report.actual_sent, 6);
+    assert_eq!(report.failed_clients, 0);
+    assert_eq!(report.mode, Mode::Sub);
 }
