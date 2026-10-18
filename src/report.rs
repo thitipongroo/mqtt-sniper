@@ -17,6 +17,7 @@ pub struct BenchmarkReport {
     pub retain: bool,
     pub target_messages: usize,
     pub actual_sent: usize,
+    pub malformed_sent: usize,
     pub failed_clients: usize,
     pub elapsed_secs: f64,
     pub throughput_msgs_per_sec: f64,
@@ -33,6 +34,7 @@ impl BenchmarkReport {
         args: &Args,
         elapsed: Duration,
         actual_sent: usize,
+        malformed_sent: usize,
         failed_clients: usize,
         hist: &Histogram<u64>,
     ) -> Self {
@@ -75,6 +77,7 @@ impl BenchmarkReport {
             retain: args.retain,
             target_messages,
             actual_sent,
+            malformed_sent,
             failed_clients,
             elapsed_secs,
             throughput_msgs_per_sec: throughput,
@@ -95,13 +98,21 @@ impl BenchmarkReport {
         println!("✅ Load test completed in {:.2?}", elapsed);
         if self.duration_secs > 0 {
             println!(
-                "📊 Total messages {}: {} (Duration target: {}s, Failed clients: {})",
-                action_label, self.actual_sent, self.duration_secs, self.failed_clients
+                "📊 Total messages {}: {} (Duration target: {}s, Malformed injected: {}, Failed clients: {})",
+                action_label,
+                self.actual_sent,
+                self.duration_secs,
+                self.malformed_sent,
+                self.failed_clients
             );
         } else {
             println!(
-                "📊 Total messages {}: {} / {} (Failed clients: {})",
-                action_label, self.actual_sent, self.target_messages, self.failed_clients
+                "📊 Total messages {}: {} / {} (Malformed injected: {}, Failed clients: {})",
+                action_label,
+                self.actual_sent,
+                self.target_messages,
+                self.malformed_sent,
+                self.failed_clients
             );
         }
         if self.elapsed_secs > 0.0 {

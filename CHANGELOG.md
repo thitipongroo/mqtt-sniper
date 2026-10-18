@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-10-18
+
+### Added
+
+- **Client Start Index & Prefix (`--start-number` / `-n`, `--client-prefix`)**: Added configurable starting index for `{device_id}` and client IDs (e.g., `-n 1` for 1-based device pools `sensor-1..sensor-N` or distributed multi-node load sharding).
+- **Dynamic Per-Device Credentials**: Enabled `{device_id}` variable interpolation inside `--username` and `--password` for brokers enforcing per-device authentication and ACLs.
+- **External Payload Template Files (`--payload-file`)**: Load JSON/text payload templates directly from disk with full dynamic placeholder interpolation.
+- **Chaos / DLQ Fault Injection (`--malformed-rate`)**: Added configurable malformed payload injection rate (`0.0` to `1.0`) to stress-test Dead-Letter Queue (DLQ) routing and consumer resilience, tracked via `malformed_sent` in terminal and JSON reports.
+- **Multi-Precision Timestamps & Boolean Placeholders**: Added `{timestamp_secs}` (epoch seconds), `{timestamp_us}` (epoch microseconds), and `{random_bool}` (`true`/`false`) placeholders.
+- **Multi-Key & Auto-Unit Subscribe Latency**: Enhanced `--mode sub` end-to-end latency calculation to recognize `"ts"`, `"timestamp"`, and `"time"` fields and automatically detect epoch seconds, milliseconds, or microseconds.
+
 ## [0.4.0] - 2026-10-18
 
 ### Added

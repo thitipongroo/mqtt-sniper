@@ -86,6 +86,8 @@ fn default_test_args(port: u16, clients: usize, messages: usize, qos: u8, topic:
         port,
         mode: Mode::Pub,
         clients,
+        start_number: 0,
+        client_prefix: "sniper-client-".to_string(),
         max_connections: 0,
         messages,
         duration_secs: 0,
@@ -96,7 +98,9 @@ fn default_test_args(port: u16, clients: usize, messages: usize, qos: u8, topic:
         ramp_up_ms: 0,
         interval_ms: 0,
         payload: "{}".to_string(),
+        payload_file: None,
         payload_size: 0,
+        malformed_rate: 0.0,
         username: None,
         password: None,
         tls: false,
@@ -202,4 +206,29 @@ async fn test_load_test_duration_mode() {
     assert_eq!(report.failed_clients, 0);
     assert_eq!(report.duration_secs, 1);
     assert!(report.retain);
+}
+
+#[tokio::test]
+async fn test_start_number_dynamic_credentials_and_chaos() {
+    let clients = 2;
+    let messages = 2;
+    let port = start_mock_broker(1, clients).await;
+
+    let mut args = default_test_args(
+        port,
+        clients,
+        messages,
+        1,
+        "tenants/org-1/devices/sensor-{device_id}/telemetry",
+    );
+    args.start_number = 1;
+    args.client_prefix = "sensor-".to_string();
+    args.username = Some("sensor-{device_id}".to_string());
+    args.password = Some("dev-pass-{device_id}".to_string());
+    args.malformed_rate = 1.0;
+
+    let report = run_load_test(args).await;
+    assert_eq!(report.actual_sent, 4);
+    assert_eq!(report.malformed_sent, 4);
+    assert_eq!(report.failed_clients, 0);
 }

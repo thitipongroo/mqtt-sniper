@@ -34,6 +34,14 @@ pub struct Args {
     #[arg(short, long, default_value_t = 100)]
     pub clients: usize,
 
+    /// Starting index for client IDs and {device_id} variable (e.g., 1 for sensor-1..sensor-N)
+    #[arg(short = 'n', long, default_value_t = 0)]
+    pub start_number: usize,
+
+    /// Prefix for generated MQTT client IDs (client ID = <prefix><device_id>)
+    #[arg(long, default_value = "sniper-client-")]
+    pub client_prefix: String,
+
     /// Maximum number of active concurrent connections (0 = unlimited)
     #[arg(long, default_value_t = 0)]
     pub max_connections: usize,
@@ -70,22 +78,30 @@ pub struct Args {
     #[arg(short, long, default_value_t = 0)]
     pub interval_ms: u64,
 
-    /// Custom payload template (supports {device_id}, {seq}, {timestamp}, {random_int}, {random_float}, {uuid})
+    /// Custom payload template (supports {device_id}, {seq}, {timestamp}, {timestamp_secs}, {timestamp_us}, {random_int}, {random_float}, {random_bool}, {uuid})
     #[arg(
         long,
         default_value = r#"{"device_id": {device_id}, "seq": {seq}, "ts": {timestamp}}"#
     )]
     pub payload: String,
 
+    /// Path to a custom payload template file (overrides --payload)
+    #[arg(long)]
+    pub payload_file: Option<String>,
+
     /// Minimum payload size in bytes (padded with 'x' if shorter)
     #[arg(long, default_value_t = 0)]
     pub payload_size: usize,
 
-    /// Username for MQTT broker authentication
+    /// Fraction of published messages (0.0 to 1.0) to intentionally corrupt for DLQ/chaos testing
+    #[arg(long, default_value_t = 0.0)]
+    pub malformed_rate: f64,
+
+    /// Username for MQTT broker authentication (supports {device_id})
     #[arg(short, long)]
     pub username: Option<String>,
 
-    /// Password for MQTT broker authentication
+    /// Password for MQTT broker authentication (supports {device_id})
     #[arg(long)]
     pub password: Option<String>,
 
@@ -115,6 +131,23 @@ pub fn parse_qos(qos: u8) -> QoS {
         1 => QoS::AtLeastOnce,
         2 => QoS::ExactlyOnce,
         _ => QoS::AtMostOnce,
+    }
+}
+
+pub fn resolve_payload_template(args: &Args) -> Result<String, String> {
+    if !(0.0..=1.0).contains(&args.malformed_rate) {
+        return Err(format!(
+            "--malformed-rate must be between 0.0 and 1.0 (got {})",
+            args.malformed_rate
+        ));
+    }
+
+    if let Some(ref path) = args.payload_file {
+        let content = fs::read_to_string(path)
+            .map_err(|e| format!("Failed to read payload file '{}': {}", path, e))?;
+        Ok(content.trim().to_string())
+    } else {
+        Ok(args.payload.clone())
     }
 }
 
@@ -170,6 +203,8 @@ mod tests {
         assert_eq!(args.port, 1883);
         assert_eq!(args.mode, Mode::Pub);
         assert_eq!(args.clients, 100);
+        assert_eq!(args.start_number, 0);
+        assert_eq!(args.client_prefix, "sniper-client-");
         assert_eq!(args.max_connections, 0);
         assert_eq!(args.messages, 10);
         assert_eq!(args.duration_secs, 0);
@@ -183,7 +218,9 @@ mod tests {
             args.payload,
             r#"{"device_id": {device_id}, "seq": {seq}, "ts": {timestamp}}"#
         );
+        assert_eq!(args.payload_file, None);
         assert_eq!(args.payload_size, 0);
+        assert_eq!(args.malformed_rate, 0.0);
         assert_eq!(args.username, None);
         assert_eq!(args.password, None);
         assert!(!args.tls);
@@ -205,6 +242,10 @@ mod tests {
             "sub",
             "-c",
             "50",
+            "-n",
+            "1",
+            "--client-prefix",
+            "sensor-",
             "--max-connections",
             "25",
             "-m",
@@ -224,12 +265,16 @@ mod tests {
             "10",
             "--payload",
             r#"{"id": {device_id}}"#,
+            "--payload-file",
+            "template.json",
             "--payload-size",
             "64",
+            "--malformed-rate",
+            "0.05",
             "-u",
-            "myuser",
+            "sensor-{device_id}",
             "--password",
-            "mypass",
+            "pass-{device_id}",
             "--tls",
             "--ca",
             "ca.pem",
@@ -244,6 +289,8 @@ mod tests {
         assert_eq!(args.port, 8883);
         assert_eq!(args.mode, Mode::Sub);
         assert_eq!(args.clients, 50);
+        assert_eq!(args.start_number, 1);
+        assert_eq!(args.client_prefix, "sensor-");
         assert_eq!(args.max_connections, 25);
         assert_eq!(args.messages, 20);
         assert_eq!(args.duration_secs, 60);
@@ -254,14 +301,35 @@ mod tests {
         assert_eq!(args.ramp_up_ms, 5);
         assert_eq!(args.interval_ms, 10);
         assert_eq!(args.payload, r#"{"id": {device_id}}"#);
+        assert_eq!(args.payload_file, Some("template.json".to_string()));
         assert_eq!(args.payload_size, 64);
-        assert_eq!(args.username, Some("myuser".to_string()));
-        assert_eq!(args.password, Some("mypass".to_string()));
+        assert!((args.malformed_rate - 0.05).abs() < f64::EPSILON);
+        assert_eq!(args.username, Some("sensor-{device_id}".to_string()));
+        assert_eq!(args.password, Some("pass-{device_id}".to_string()));
         assert!(args.tls);
         assert_eq!(args.ca, Some("ca.pem".to_string()));
         assert_eq!(args.cert, Some("client.crt".to_string()));
         assert_eq!(args.key, Some("client.key".to_string()));
         assert_eq!(args.output_json, Some("report.json".to_string()));
+    }
+
+    #[test]
+    fn test_resolve_payload_template_and_validation() {
+        let mut args = Args::parse_from(["mqtt-sniper"]);
+        assert_eq!(resolve_payload_template(&args).unwrap(), args.payload);
+
+        args.malformed_rate = 1.5;
+        assert!(resolve_payload_template(&args).is_err());
+
+        args.malformed_rate = 0.05;
+        let tmp_file = std::env::temp_dir().join("mqtt_sniper_test_payload.json");
+        fs::write(&tmp_file, "  {\"deviceId\": \"sensor-{device_id}\"} \n").unwrap();
+        args.payload_file = Some(tmp_file.to_str().unwrap().to_string());
+        assert_eq!(
+            resolve_payload_template(&args).unwrap(),
+            r#"{"deviceId": "sensor-{device_id}"}"#
+        );
+        let _ = fs::remove_file(&tmp_file);
     }
 
     #[test]

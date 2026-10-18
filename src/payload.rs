@@ -32,10 +32,12 @@ fn generate_uuid_v4(seed: u64) -> String {
 }
 
 pub fn build_payload(template: &str, device_id: usize, seq: usize, min_size: usize) -> Vec<u8> {
-    let timestamp = SystemTime::now()
+    let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
+        .unwrap_or_default();
+    let timestamp_ms = now.as_millis();
+    let timestamp_secs = now.as_secs();
+    let timestamp_us = now.as_micros();
 
     let seed = ((device_id as u64) << 32) ^ (seq as u64);
 
@@ -43,7 +45,9 @@ pub fn build_payload(template: &str, device_id: usize, seq: usize, min_size: usi
     let mut rendered = template
         .replace("{device_id}", &device_id.to_string())
         .replace("{seq}", &seq.to_string())
-        .replace("{timestamp}", &timestamp.to_string());
+        .replace("{timestamp}", &timestamp_ms.to_string())
+        .replace("{timestamp_secs}", &timestamp_secs.to_string())
+        .replace("{timestamp_us}", &timestamp_us.to_string());
 
     if rendered.contains("{random_int}") {
         let rand_int = next_random_u64(seed) % 101;
@@ -53,6 +57,11 @@ pub fn build_payload(template: &str, device_id: usize, seq: usize, min_size: usi
     if rendered.contains("{random_float}") {
         let rand_float = 20.0 + ((next_random_u64(seed.wrapping_add(7)) % 2001) as f64 / 100.0);
         rendered = rendered.replace("{random_float}", &format!("{:.2}", rand_float));
+    }
+
+    if rendered.contains("{random_bool}") {
+        let rand_bool = (next_random_u64(seed.wrapping_add(13)) & 1) == 0;
+        rendered = rendered.replace("{random_bool}", if rand_bool { "true" } else { "false" });
     }
 
     if rendered.contains("{uuid}") {
@@ -66,6 +75,24 @@ pub fn build_payload(template: &str, device_id: usize, seq: usize, min_size: usi
     }
 
     rendered.into_bytes()
+}
+
+pub fn build_payload_with_chaos(
+    template: &str,
+    device_id: usize,
+    seq: usize,
+    min_size: usize,
+    malformed_rate: f64,
+) -> (Vec<u8>, bool) {
+    if malformed_rate > 0.0 {
+        let seed = ((device_id as u64) << 32) ^ (seq as u64) ^ 0x517C_C1B7_2722_0A95;
+        let sample = (next_random_u64(seed) % 10_000) as f64 / 10_000.0;
+        if malformed_rate >= 1.0 || sample < malformed_rate {
+            let malformed = format!("{{malformed_json_device_{}_seq_{}", device_id, seq);
+            return (malformed.into_bytes(), true);
+        }
+    }
+    (build_payload(template, device_id, seq, min_size), false)
 }
 
 #[cfg(test)]
@@ -89,7 +116,7 @@ mod tests {
 
     #[test]
     fn test_build_payload_dynamic_random_placeholders() {
-        let template = r#"{"uuid":"{uuid}","int":{random_int},"float":{random_float}}"#;
+        let template = r#"{"uuid":"{uuid}","int":{random_int},"float":{random_float},"bool":{random_bool},"sec":{timestamp_secs},"us":{timestamp_us}}"#;
         let payload = build_payload(template, 1, 2, 0);
         let parsed: serde_json::Value = serde_json::from_slice(&payload).unwrap();
 
@@ -102,5 +129,21 @@ mod tests {
 
         let float_val = parsed["float"].as_f64().unwrap();
         assert!((20.0..=40.0).contains(&float_val));
+
+        assert!(parsed["bool"].is_boolean());
+        assert!(parsed["sec"].as_u64().unwrap() > 1_700_000_000);
+        assert!(parsed["us"].as_u64().unwrap() > 1_700_000_000_000_000);
+    }
+
+    #[test]
+    fn test_build_payload_with_chaos() {
+        let template = r#"{"id":{device_id}}"#;
+        let (valid_bytes, is_malformed) = build_payload_with_chaos(template, 1, 0, 0, 0.0);
+        assert!(!is_malformed);
+        assert!(serde_json::from_slice::<serde_json::Value>(&valid_bytes).is_ok());
+
+        let (corrupt_bytes, is_malformed_all) = build_payload_with_chaos(template, 1, 0, 0, 1.0);
+        assert!(is_malformed_all);
+        assert!(serde_json::from_slice::<serde_json::Value>(&corrupt_bytes).is_err());
     }
 }

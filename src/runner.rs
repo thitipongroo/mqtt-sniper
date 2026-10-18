@@ -1,5 +1,5 @@
-use crate::cli::{Args, Mode, build_transport, parse_qos};
-use crate::payload::build_payload;
+use crate::cli::{Args, Mode, build_transport, parse_qos, resolve_payload_template};
+use crate::payload::build_payload_with_chaos;
 use crate::report::BenchmarkReport;
 use hdrhistogram::Histogram;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -13,14 +13,27 @@ use tokio::task;
 
 fn extract_payload_latency_us(payload: &[u8], fallback_start: Instant) -> u64 {
     if let Ok(val) = serde_json::from_slice::<serde_json::Value>(payload)
-        && let Some(ts_ms) = val.get("ts").and_then(|v| v.as_u64())
+        && let Some(raw_ts) = val
+            .get("ts")
+            .or_else(|| val.get("timestamp"))
+            .or_else(|| val.get("time"))
+            .and_then(|v| v.as_u64())
     {
-        let now_ms = SystemTime::now()
+        // Auto-detect Unix timestamp precision: seconds (~10^9), milliseconds (~10^12), or microseconds (~10^15)
+        let ts_us = if raw_ts < 10_000_000_000 {
+            raw_ts.saturating_mul(1_000_000)
+        } else if raw_ts < 10_000_000_000_000 {
+            raw_ts.saturating_mul(1_000)
+        } else {
+            raw_ts
+        };
+
+        let now_us = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
-            .as_millis() as u64;
-        if now_ms >= ts_ms {
-            return (now_ms - ts_ms).saturating_mul(1000).max(1);
+            .as_micros() as u64;
+        if now_us >= ts_us {
+            return (now_us - ts_us).max(1);
         }
     }
     fallback_start.elapsed().as_micros() as u64
@@ -29,6 +42,10 @@ fn extract_payload_latency_us(payload: &[u8], fallback_start: Instant) -> u64 {
 pub async fn run_load_test(args: Args) -> BenchmarkReport {
     let qos = parse_qos(args.qos);
     let target_messages = args.clients * args.messages;
+    let resolved_payload = resolve_payload_template(&args).unwrap_or_else(|err| {
+        eprintln!("❌ Payload Configuration Error: {}", err);
+        std::process::exit(1);
+    });
     let transport = build_transport(&args).unwrap_or_else(|err| {
         eprintln!("❌ TLS Configuration Error: {}", err);
         std::process::exit(1);
@@ -74,6 +91,7 @@ pub async fn run_load_test(args: Args) -> BenchmarkReport {
     let start_time = Instant::now();
     let mut handles = Vec::with_capacity(args.clients);
     let published_count = Arc::new(AtomicUsize::new(0));
+    let malformed_count = Arc::new(AtomicUsize::new(0));
     let failed_clients = Arc::new(AtomicUsize::new(0));
     let semaphore = if args.max_connections > 0 {
         Some(Arc::new(Semaphore::new(args.max_connections)))
@@ -88,10 +106,14 @@ pub async fn run_load_test(args: Args) -> BenchmarkReport {
             tokio::time::sleep(Duration::from_millis(args.ramp_up_ms)).await;
         }
 
+        let device_id = args.start_number + i;
+        let device_id_str = device_id.to_string();
         let broker = args.broker.clone();
-        let topic = args.topic.replace("{device_id}", &i.to_string());
-        let payload_template = args.payload.clone();
+        let topic = args.topic.replace("{device_id}", &device_id_str);
+        let client_id = format!("{}{}", args.client_prefix, device_id);
+        let payload_template = resolved_payload.clone();
         let payload_size = args.payload_size;
+        let malformed_rate = args.malformed_rate;
         let port = args.port;
         let mode = args.mode;
         let messages = args.messages;
@@ -99,10 +121,17 @@ pub async fn run_load_test(args: Args) -> BenchmarkReport {
         let retain = args.retain;
         let keep_alive = args.keep_alive;
         let interval_ms = args.interval_ms;
-        let username = args.username.clone();
-        let password = args.password.clone();
+        let username = args
+            .username
+            .as_ref()
+            .map(|u| u.replace("{device_id}", &device_id_str));
+        let password = args
+            .password
+            .as_ref()
+            .map(|p| p.replace("{device_id}", &device_id_str));
         let client_transport = transport.clone();
         let published_counter = Arc::clone(&published_count);
+        let malformed_counter = Arc::clone(&malformed_count);
         let failed_counter = Arc::clone(&failed_clients);
         let pb_clone = pb.clone();
         let sem_clone = semaphore.clone();
@@ -114,7 +143,6 @@ pub async fn run_load_test(args: Args) -> BenchmarkReport {
                 None => None,
             };
 
-            let client_id = format!("sniper-client-{}", i);
             let mut mqttoptions = MqttOptions::new(client_id, broker, port);
             mqttoptions.set_keep_alive(Duration::from_secs(keep_alive.max(1)));
             mqttoptions.set_transport(client_transport);
@@ -135,8 +163,16 @@ pub async fn run_load_test(args: Args) -> BenchmarkReport {
                             let deadline = Instant::now() + Duration::from_secs(duration_secs);
                             let mut j = 0usize;
                             while Instant::now() < deadline {
-                                let payload_bytes =
-                                    build_payload(&payload_template, i, j, payload_size);
+                                let (payload_bytes, is_malformed) = build_payload_with_chaos(
+                                    &payload_template,
+                                    device_id,
+                                    j,
+                                    payload_size,
+                                    malformed_rate,
+                                );
+                                if is_malformed {
+                                    malformed_counter.fetch_add(1, Ordering::Relaxed);
+                                }
                                 let _ = tx_time.send(Instant::now());
                                 if client
                                     .publish(topic.as_str(), qos, retain, payload_bytes)
@@ -163,8 +199,16 @@ pub async fn run_load_test(args: Args) -> BenchmarkReport {
                             let _ = client.disconnect().await;
                         } else {
                             for j in 0..messages {
-                                let payload_bytes =
-                                    build_payload(&payload_template, i, j, payload_size);
+                                let (payload_bytes, is_malformed) = build_payload_with_chaos(
+                                    &payload_template,
+                                    device_id,
+                                    j,
+                                    payload_size,
+                                    malformed_rate,
+                                );
+                                if is_malformed {
+                                    malformed_counter.fetch_add(1, Ordering::Relaxed);
+                                }
                                 let _ = tx_time.send(Instant::now());
                                 if client
                                     .publish(topic.as_str(), qos, retain, payload_bytes)
@@ -289,9 +333,10 @@ pub async fn run_load_test(args: Args) -> BenchmarkReport {
     // Calculate and print benchmark summary
     let elapsed = start_time.elapsed();
     let actual_sent = published_count.load(Ordering::Relaxed);
+    let malformed_sent = malformed_count.load(Ordering::Relaxed);
     let errors = failed_clients.load(Ordering::Relaxed);
 
-    let report = BenchmarkReport::new(&args, elapsed, actual_sent, errors, &hist);
+    let report = BenchmarkReport::new(&args, elapsed, actual_sent, malformed_sent, errors, &hist);
     report.print_summary(elapsed);
 
     if let Some(ref path) = args.output_json {
@@ -299,4 +344,29 @@ pub async fn run_load_test(args: Args) -> BenchmarkReport {
     }
 
     report
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_payload_latency_supports_ts_timestamp_and_units() {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+        let now_ms = now.as_millis() as u64;
+        let now_secs = now.as_secs();
+        let fallback = Instant::now();
+
+        let payload_ts = format!(r#"{{"ts": {}}}"#, now_ms.saturating_sub(15));
+        let lat_ts = extract_payload_latency_us(payload_ts.as_bytes(), fallback);
+        assert!(lat_ts >= 10_000);
+
+        let payload_timestamp = format!(r#"{{"timestamp": {}}}"#, now_ms.saturating_sub(25));
+        let lat_timestamp = extract_payload_latency_us(payload_timestamp.as_bytes(), fallback);
+        assert!(lat_timestamp >= 20_000);
+
+        let payload_secs = format!(r#"{{"timestamp": {}}}"#, now_secs.saturating_sub(1));
+        let lat_secs = extract_payload_latency_us(payload_secs.as_bytes(), fallback);
+        assert!(lat_secs >= 500_000);
+    }
 }
