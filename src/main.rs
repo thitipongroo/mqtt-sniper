@@ -1,7 +1,7 @@
 use clap::Parser;
 use rumqttc::{AsyncClient, Event, MqttOptions, Outgoing, QoS};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::task;
 
@@ -138,8 +138,8 @@ async fn main() {
                     {
                         break;
                     }
-                    if args.interval_ms > 0 && j + 1 < messages {
-                        tokio::time::sleep(Duration::from_millis(args.interval_ms)).await;
+                    if interval_ms > 0 && j + 1 < messages {
+                        tokio::time::sleep(Duration::from_millis(interval_ms)).await;
                     }
                 }
                 let _ = client.disconnect().await;
