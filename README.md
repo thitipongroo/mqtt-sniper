@@ -68,18 +68,31 @@ Stress-test with custom parameters (e.g., 1,000 clients sending 50 messages each
 | `--port` | `-p` | `1883` | Target MQTT broker TCP port |
 | `--clients` | `-c` | `100` | Number of concurrent simulated IoT clients |
 | `--messages` | `-m` | `10` | Number of messages published per client |
-| `--topic` | `-t` | `sensor/sniper` | MQTT topic to publish messages to |
+| `--topic` | `-t` | `sensor/sniper` | MQTT topic to publish messages to (supports `{device_id}`) |
 | `--qos` | `-q` | `0` | MQTT Quality of Service level (`0`, `1`, or `2`) |
+| `--ramp-up-ms` | - | `0` | Delay (ms) before spawning consecutive clients (prevents TCP SYN flood) |
+| `--interval-ms` | `-i` | `0` | Delay (ms) between consecutive messages from the same client |
+| `--payload` | - | `{"device_id": {device_id}, "seq": {seq}, "ts": {timestamp}}` | Custom payload template (supports `{device_id}`, `{seq}`, `{timestamp}`) |
+| `--payload-size` | - | `0` | Minimum payload size in bytes (padded with `x` if rendered payload is smaller) |
+| `--username` | `-u` | - | Username for MQTT broker authentication |
+| `--password` | - | - | Password for MQTT broker authentication |
 | `--help` | `-h` | - | Print help information |
 | `--version` | `-V` | - | Print version information |
 
 ### 📦 Payload Format
 
-Each client (`sniper-client-{i}`) publishes JSON payloads to the target topic:
+Each client (`sniper-client-{i}`) publishes JSON payloads to the target topic. By default:
 
 ```json
-{"device_id": 0, "seq": 0}
+{"device_id": 0, "seq": 0, "ts": 1713400000000}
 ```
+
+The payload template can be customized via `--payload`, and dynamic variables are substituted automatically:
+- `{device_id}`: Simulated client index (0, 1, 2, ...)
+- `{seq}`: Message sequence number per client
+- `{timestamp}`: Current Unix timestamp in milliseconds
+
+Use `--payload-size` to enforce a minimum payload byte size (useful for benchmarking network bandwidth under large packet loads).
 
 ### 📊 Example Output
 

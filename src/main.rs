@@ -1,5 +1,5 @@
 use clap::Parser;
-use rumqttc::{AsyncClient, Event, MqttOptions, Outgoing, QoS};
+use rumqttc::{AsyncClient, Event, MqttOptions, Outgoing, Packet, QoS};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -9,42 +9,59 @@ use tokio::task;
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Blazing fast MQTT Load Tester")]
 struct Args {
-    #[arg(short, long, default_value = "localhost")]
+    /// Target MQTT broker hostname or IP address
+    #[arg(
+        short,
+        long,
+        default_value = "localhost",
+        help = "Target MQTT broker hostname or IP address"
+    )]
     broker: String,
 
+    /// Target MQTT broker TCP port
     #[arg(short, long, default_value_t = 1883)]
     port: u16,
 
+    /// Number of concurrent simulated IoT clients
     #[arg(short, long, default_value_t = 100)]
     clients: usize, // จำนวนอุปกรณ์ IoT จำลอง
 
+    /// Number of messages published per client
     #[arg(short, long, default_value_t = 10)]
     messages: usize, // จำนวนข้อความต่อ 1 อุปกรณ์
 
+    /// MQTT topic to publish messages to (supports {device_id})
     #[arg(short, long, default_value = "sensor/sniper")]
     topic: String,
 
+    /// MQTT Quality of Service level (0 = AtMostOnce, 1 = AtLeastOnce, 2 = ExactlyOnce)
     #[arg(short, long, default_value_t = 0, value_parser = clap::value_parser!(u8).range(0..=2))]
     qos: u8, // ระดับ QoS (0 = AtMostOnce, 1 = AtLeastOnce, 2 = ExactlyOnce)
 
+    /// Delay (ms) before spawning consecutive clients (prevents TCP SYN flood)
     #[arg(long, default_value_t = 0)]
     ramp_up_ms: u64, // หน่วงเวลา (ms) ก่อนสร้าง Client ตัวถัดไป (ป้องกัน TCP SYN Flood)
 
+    /// Delay (ms) between consecutive messages from the same client
     #[arg(short, long, default_value_t = 0)]
     interval_ms: u64, // หน่วงเวลา (ms) ระหว่างการส่งแต่ละข้อความของอุปกรณ์เดียวกัน
 
+    /// Custom payload template (supports {device_id}, {seq}, {timestamp})
     #[arg(
         long,
         default_value = r#"{"device_id": {device_id}, "seq": {seq}, "ts": {timestamp}}"#
     )]
     payload: String, // รูปแบบข้อความ (รองรับตัวแปร {device_id}, {seq}, {timestamp})
 
+    /// Minimum payload size in bytes (padded with 'x' if shorter)
     #[arg(long, default_value_t = 0)]
     payload_size: usize, // บังคับขนาด Payload ขั้นต่ำ (Bytes) ถ้าระบุ > 0 จะเติมข้อมูลให้ครบขนาด
 
+    /// Username for MQTT broker authentication
     #[arg(short, long)]
     username: Option<String>,
 
+    /// Password for MQTT broker authentication
     #[arg(long)]
     password: Option<String>,
 }
@@ -82,6 +99,10 @@ fn build_payload(template: &str, device_id: usize, seq: usize, min_size: usize) 
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
+    let _ = run_load_test(args).await;
+}
+
+async fn run_load_test(args: Args) -> (Duration, usize, usize) {
     let qos = parse_qos(args.qos);
 
     println!("🚀 Starting MQTT Sniper...");
@@ -126,6 +147,7 @@ async fn main() {
             }
 
             let (client, mut eventloop) = AsyncClient::new(mqttoptions, 50);
+            let client_clone = client.clone();
 
             // สาดข้อความ (Publish) ใน Task ย่อย เพื่อส่งคำสั่งเข้า Channel
             let publisher = tokio::spawn(async move {
@@ -142,14 +164,40 @@ async fn main() {
                         tokio::time::sleep(Duration::from_millis(interval_ms)).await;
                     }
                 }
-                let _ = client.disconnect().await;
+                // สำหรับ QoS 0 (หรือเมื่อไม่มีข้อความที่ต้องส่ง) สั่ง disconnect ได้ทันทีเมื่อส่งเข้า channel ครบ
+                if qos == QoS::AtMostOnce || messages == 0 {
+                    let _ = client.disconnect().await;
+                }
             });
 
-            // ต้องมี Loop ดึง Event ออกมา (กฎของ rumqttc) และรอจนกว่าจะส่งออกทาง TCP จริงๆ
+            // ต้องมี Loop ดึง Event ออกมา (กฎของ rumqttc)
+            // สำหรับ QoS 0: รอจนกว่าจะส่งคำสั่ง Disconnect ออกทาง TCP
+            // สำหรับ QoS 1/2: รอรับ PUBACK / PUBCOMP ให้ครบทุกข้อความก่อนสั่ง Disconnect
+            let mut acked_count = 0usize;
             loop {
                 match eventloop.poll().await {
                     Ok(Event::Outgoing(Outgoing::Publish(_))) => {
-                        published_counter.fetch_add(1, Ordering::Relaxed);
+                        if qos == QoS::AtMostOnce {
+                            published_counter.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                    Ok(Event::Incoming(Packet::PubAck(_))) => {
+                        if qos == QoS::AtLeastOnce {
+                            published_counter.fetch_add(1, Ordering::Relaxed);
+                            acked_count += 1;
+                            if acked_count == messages {
+                                let _ = client_clone.disconnect().await;
+                            }
+                        }
+                    }
+                    Ok(Event::Incoming(Packet::PubComp(_))) => {
+                        if qos == QoS::ExactlyOnce {
+                            published_counter.fetch_add(1, Ordering::Relaxed);
+                            acked_count += 1;
+                            if acked_count == messages {
+                                let _ = client_clone.disconnect().await;
+                            }
+                        }
                     }
                     Ok(Event::Outgoing(Outgoing::Disconnect)) => {
                         break;
@@ -162,6 +210,7 @@ async fn main() {
                 }
             }
 
+            publisher.abort();
             let _ = publisher.await;
         });
 
@@ -184,15 +233,21 @@ async fn main() {
         "📊 Total messages sent: {} / {} (Failed clients: {})",
         actual_sent, target_messages, errors
     );
-    println!(
-        "⚡ Throughput: {:.2} msgs/sec",
-        (actual_sent as f64) / elapsed.as_secs_f64()
-    );
+    if elapsed.as_secs_f64() > 0.0 {
+        println!(
+            "⚡ Throughput: {:.2} msgs/sec",
+            (actual_sent as f64) / elapsed.as_secs_f64()
+        );
+    }
+
+    (elapsed, actual_sent, errors)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
 
     #[test]
     fn test_parse_qos() {
@@ -211,5 +266,208 @@ mod tests {
         assert_eq!(args.messages, 10);
         assert_eq!(args.topic, "sensor/sniper");
         assert_eq!(args.qos, 0);
+        assert_eq!(args.ramp_up_ms, 0);
+        assert_eq!(args.interval_ms, 0);
+        assert_eq!(
+            args.payload,
+            r#"{"device_id": {device_id}, "seq": {seq}, "ts": {timestamp}}"#
+        );
+        assert_eq!(args.payload_size, 0);
+        assert_eq!(args.username, None);
+        assert_eq!(args.password, None);
+    }
+
+    #[test]
+    fn test_cli_custom_args() {
+        let args = Args::parse_from([
+            "mqtt-sniper",
+            "-b",
+            "10.0.0.1",
+            "-p",
+            "1884",
+            "-c",
+            "50",
+            "-m",
+            "20",
+            "-t",
+            "test/topic/{device_id}",
+            "-q",
+            "2",
+            "--ramp-up-ms",
+            "5",
+            "-i",
+            "10",
+            "--payload",
+            r#"{"id": {device_id}}"#,
+            "--payload-size",
+            "64",
+            "-u",
+            "myuser",
+            "--password",
+            "mypass",
+        ]);
+        assert_eq!(args.broker, "10.0.0.1");
+        assert_eq!(args.port, 1884);
+        assert_eq!(args.clients, 50);
+        assert_eq!(args.messages, 20);
+        assert_eq!(args.topic, "test/topic/{device_id}");
+        assert_eq!(args.qos, 2);
+        assert_eq!(args.ramp_up_ms, 5);
+        assert_eq!(args.interval_ms, 10);
+        assert_eq!(args.payload, r#"{"id": {device_id}}"#);
+        assert_eq!(args.payload_size, 64);
+        assert_eq!(args.username, Some("myuser".to_string()));
+        assert_eq!(args.password, Some("mypass".to_string()));
+    }
+
+    #[test]
+    fn test_build_payload() {
+        let template = r#"{"id":{device_id},"s":{seq}}"#;
+        let payload = build_payload(template, 42, 7, 0);
+        let s = String::from_utf8(payload).unwrap();
+        assert_eq!(s, r#"{"id":42,"s":7}"#);
+
+        // Test with minimum size padding
+        let padded = build_payload(template, 42, 7, 25);
+        assert_eq!(padded.len(), 25);
+        let padded_str = String::from_utf8(padded).unwrap();
+        assert!(padded_str.starts_with(r#"{"id":42,"s":7}"#));
+        assert!(padded_str.ends_with("xxxxxxxxx"));
+    }
+
+    async fn start_mock_broker(expected_qos: u8, expected_clients: usize) -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        tokio::spawn(async move {
+            let mut client_tasks = Vec::new();
+            for _ in 0..expected_clients {
+                if let Ok((mut socket, _)) = listener.accept().await {
+                    let task = tokio::spawn(async move {
+                        let mut buf = [0u8; 1024];
+                        // Read CONNECT
+                        let _ = socket.read(&mut buf).await;
+                        // Send CONNACK
+                        let _ = socket.write_all(&[0x20, 0x02, 0x00, 0x00]).await;
+
+                        loop {
+                            let mut header = [0u8; 2];
+                            if socket.read_exact(&mut header).await.is_err() {
+                                break;
+                            }
+                            let ptype = header[0] >> 4;
+                            let rem_len = header[1] as usize;
+                            let mut body = vec![0u8; rem_len];
+                            if socket.read_exact(&mut body).await.is_err() {
+                                break;
+                            }
+
+                            if ptype == 3 {
+                                // PUBLISH
+                                if expected_qos == 1 {
+                                    let topic_len = u16::from_be_bytes([body[0], body[1]]) as usize;
+                                    let pkid = &body[2 + topic_len..2 + topic_len + 2];
+                                    let _ = socket.write_all(&[0x40, 0x02, pkid[0], pkid[1]]).await;
+                                } else if expected_qos == 2 {
+                                    let topic_len = u16::from_be_bytes([body[0], body[1]]) as usize;
+                                    let pkid = &body[2 + topic_len..2 + topic_len + 2];
+                                    let _ = socket.write_all(&[0x50, 0x02, pkid[0], pkid[1]]).await;
+                                }
+                            } else if ptype == 6 {
+                                // PUBREL -> Send PUBCOMP
+                                let _ = socket.write_all(&[0x70, 0x02, body[0], body[1]]).await;
+                            } else if ptype == 14 {
+                                // DISCONNECT
+                                break;
+                            }
+                        }
+                    });
+                    client_tasks.push(task);
+                }
+            }
+            for task in client_tasks {
+                let _ = task.await;
+            }
+        });
+
+        port
+    }
+
+    #[tokio::test]
+    async fn test_load_test_qos0() {
+        let clients = 2;
+        let messages = 3;
+        let port = start_mock_broker(0, clients).await;
+
+        let args = Args {
+            broker: "127.0.0.1".to_string(),
+            port,
+            clients,
+            messages,
+            topic: "test/qos0".to_string(),
+            qos: 0,
+            ramp_up_ms: 0,
+            interval_ms: 0,
+            payload: "{}".to_string(),
+            payload_size: 0,
+            username: None,
+            password: None,
+        };
+
+        let (_, actual_sent, errors) = run_load_test(args).await;
+        assert_eq!(actual_sent, 6);
+        assert_eq!(errors, 0);
+    }
+
+    #[tokio::test]
+    async fn test_load_test_qos1_waits_for_puback() {
+        let clients = 2;
+        let messages = 3;
+        let port = start_mock_broker(1, clients).await;
+
+        let args = Args {
+            broker: "127.0.0.1".to_string(),
+            port,
+            clients,
+            messages,
+            topic: "test/qos1".to_string(),
+            qos: 1,
+            ramp_up_ms: 0,
+            interval_ms: 0,
+            payload: "{}".to_string(),
+            payload_size: 0,
+            username: None,
+            password: None,
+        };
+
+        let (_, actual_sent, errors) = run_load_test(args).await;
+        assert_eq!(actual_sent, 6);
+        assert_eq!(errors, 0);
+    }
+
+    #[tokio::test]
+    async fn test_load_test_qos2_waits_for_pubcomp() {
+        let clients = 2;
+        let messages = 3;
+        let port = start_mock_broker(2, clients).await;
+
+        let args = Args {
+            broker: "127.0.0.1".to_string(),
+            port,
+            clients,
+            messages,
+            topic: "test/qos2".to_string(),
+            qos: 2,
+            ramp_up_ms: 0,
+            interval_ms: 0,
+            payload: "{}".to_string(),
+            payload_size: 0,
+            username: None,
+            password: None,
+        };
+
+        let (_, actual_sent, errors) = run_load_test(args).await;
+        assert_eq!(actual_sent, 6);
+        assert_eq!(errors, 0);
     }
 }
