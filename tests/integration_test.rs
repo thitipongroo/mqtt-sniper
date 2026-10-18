@@ -88,8 +88,11 @@ fn default_test_args(port: u16, clients: usize, messages: usize, qos: u8, topic:
         clients,
         max_connections: 0,
         messages,
+        duration_secs: 0,
         topic: topic.to_string(),
         qos,
+        retain: false,
+        keep_alive: 5,
         ramp_up_ms: 0,
         interval_ms: 0,
         payload: "{}".to_string(),
@@ -181,4 +184,22 @@ async fn test_load_test_subscribe_mode_and_max_connections() {
     assert_eq!(report.actual_sent, 6);
     assert_eq!(report.failed_clients, 0);
     assert_eq!(report.mode, Mode::Sub);
+}
+
+#[tokio::test]
+async fn test_load_test_duration_mode() {
+    let clients = 1;
+    let port = start_mock_broker(0, clients).await;
+
+    let mut args = default_test_args(port, clients, 0, 0, "test/duration");
+    args.duration_secs = 1;
+    args.interval_ms = 200;
+    args.retain = true;
+    args.keep_alive = 10;
+
+    let report = run_load_test(args).await;
+    assert!(report.actual_sent >= 2);
+    assert_eq!(report.failed_clients, 0);
+    assert_eq!(report.duration_secs, 1);
+    assert!(report.retain);
 }

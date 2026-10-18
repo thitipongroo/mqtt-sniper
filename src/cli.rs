@@ -42,6 +42,10 @@ pub struct Args {
     #[arg(short, long, default_value_t = 10)]
     pub messages: usize,
 
+    /// Duration (seconds) for time-based soak testing (0 = use --messages count)
+    #[arg(short = 'd', long, default_value_t = 0)]
+    pub duration_secs: u64,
+
     /// MQTT topic to publish or subscribe to (supports {device_id})
     #[arg(short, long, default_value = "sensor/sniper")]
     pub topic: String,
@@ -49,6 +53,14 @@ pub struct Args {
     /// MQTT Quality of Service level (0 = AtMostOnce, 1 = AtLeastOnce, 2 = ExactlyOnce)
     #[arg(short, long, default_value_t = 0, value_parser = clap::value_parser!(u8).range(0..=2))]
     pub qos: u8,
+
+    /// Publish messages with the MQTT retain flag set
+    #[arg(long, default_value_t = false)]
+    pub retain: bool,
+
+    /// MQTT keep-alive interval in seconds
+    #[arg(long, default_value_t = 5)]
+    pub keep_alive: u64,
 
     /// Delay (ms) before spawning consecutive clients (prevents TCP SYN flood)
     #[arg(long, default_value_t = 0)]
@@ -58,7 +70,7 @@ pub struct Args {
     #[arg(short, long, default_value_t = 0)]
     pub interval_ms: u64,
 
-    /// Custom payload template (supports {device_id}, {seq}, {timestamp})
+    /// Custom payload template (supports {device_id}, {seq}, {timestamp}, {random_int}, {random_float}, {uuid})
     #[arg(
         long,
         default_value = r#"{"device_id": {device_id}, "seq": {seq}, "ts": {timestamp}}"#
@@ -160,8 +172,11 @@ mod tests {
         assert_eq!(args.clients, 100);
         assert_eq!(args.max_connections, 0);
         assert_eq!(args.messages, 10);
+        assert_eq!(args.duration_secs, 0);
         assert_eq!(args.topic, "sensor/sniper");
         assert_eq!(args.qos, 0);
+        assert!(!args.retain);
+        assert_eq!(args.keep_alive, 5);
         assert_eq!(args.ramp_up_ms, 0);
         assert_eq!(args.interval_ms, 0);
         assert_eq!(
@@ -194,10 +209,15 @@ mod tests {
             "25",
             "-m",
             "20",
+            "-d",
+            "60",
             "-t",
             "test/topic/{device_id}",
             "-q",
             "2",
+            "--retain",
+            "--keep-alive",
+            "30",
             "--ramp-up-ms",
             "5",
             "-i",
@@ -226,8 +246,11 @@ mod tests {
         assert_eq!(args.clients, 50);
         assert_eq!(args.max_connections, 25);
         assert_eq!(args.messages, 20);
+        assert_eq!(args.duration_secs, 60);
         assert_eq!(args.topic, "test/topic/{device_id}");
         assert_eq!(args.qos, 2);
+        assert!(args.retain);
+        assert_eq!(args.keep_alive, 30);
         assert_eq!(args.ramp_up_ms, 5);
         assert_eq!(args.interval_ms, 10);
         assert_eq!(args.payload, r#"{"id": {device_id}}"#);

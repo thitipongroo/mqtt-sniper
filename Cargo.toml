@@ -1,6 +1,6 @@
 [package]
 name = "mqtt-sniper"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 authors = ["Thitipong Roongprasert <thitipong.roo@gmail.com>"]
 description = "A blazing-fast, memory-efficient MQTT load testing CLI written in Rust using the Tokio async runtime."

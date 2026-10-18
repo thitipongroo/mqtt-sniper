@@ -16,13 +16,12 @@ MQTT Sniper leverages **Rust** and the **Tokio async runtime** to deliver extrem
 ## ⚡ Features
 
 - **High Concurrency**: Spawns thousands of independent MQTT clients in milliseconds using Tokio light-weight tasks, with optional active connection limiting (`--max-connections`).
-- **Publish & Subscribe Modes**: Benchmark both ingestion (`--mode pub`) and fan-out message delivery (`--mode sub`).
+- **Publish, Subscribe & Soak Testing**: Benchmark message ingestion (`--mode pub`), fan-out delivery (`--mode sub`), or run time-based soak tests (`--duration-secs`).
 - **Enterprise Security (TLS / mTLS)**: Native support for encrypted `mqtts://` connections (`--tls`), custom CA certificates (`--ca`), and mutual TLS client certificates (`--cert`, `--key`).
-- **Fearless Performance**: Zero garbage collection pauses, ensuring accurate throughput measurement.
+- **Dynamic Telemetry Payloads**: Inject realistic random sensor telemetry (`{random_int}`, `{random_float}`, `{uuid}`, `{device_id}`, `{seq}`, `{timestamp}`).
 - **Latency Histogram**: Tracks per-message delivery & ACK round-trip latencies (`min`, `avg`, `p50`, `p95`, `p99`, `max`) using High Dynamic Range (HDR) histograms.
 - **Live Terminal Progress**: Real-time progress bar with live throughput (`msgs/sec`) and ETA tracking.
 - **CI/CD Ready**: Export structured benchmark reports directly to JSON (`--output-json`).
-- **Plug-and-Play**: Compiled to a single native binary, no external runtimes (like JVM or Node) required.
 
 ## 🛠️ Installation & Usage
 
@@ -38,11 +37,10 @@ Cargo:
 cargo install mqtt-sniper
 ```
 
-Docker:
+Docker (via GitHub Container Registry):
 
 ```bash
-docker build -t mqtt-sniper .
-docker run --rm mqtt-sniper --broker host.docker.internal --clients 500
+docker run --rm ghcr.io/thitipongroo/mqtt-sniper:latest --broker host.docker.internal --clients 500
 ```
 
 ### Quick Start
@@ -64,6 +62,17 @@ Stress-test with custom parameters (e.g., 1,000 clients sending 50 messages each
   --topic "sensor/telemetry" \
   --qos 1 \
   --output-json report.json
+```
+
+Run a 60-second Time-based Soak Test with realistic random telemetry payloads:
+
+```bash
+./target/release/mqtt-sniper \
+  --broker 127.0.0.1 \
+  --clients 500 \
+  --duration-secs 60 \
+  --interval-ms 100 \
+  --payload '{"msg_id": "{uuid}", "device_id": {device_id}, "temp": {random_float}, "battery": {random_int}, "ts": {timestamp}}'
 ```
 
 Benchmark Fan-out Subscriber delivery (e.g., 500 subscribers each receiving 20 messages):
@@ -101,17 +110,20 @@ Connect to an enterprise broker over SSL/TLS or Mutual TLS (mTLS):
 | `--port` | `-p` | `1883` | Target MQTT broker TCP port |
 | `--mode` | - | `pub` | Benchmark mode: `pub` (publish) or `sub` (subscribe) |
 | `--clients` | `-c` | `100` | Number of concurrent simulated IoT clients |
-| `--max-connections` | - | `0` | Maximum number of active concurrent connections (0 = unlimited) |
-| `--messages` | `-m` | `10` | Number of messages published per client |
-| `--topic` | `-t` | `sensor/sniper` | MQTT topic to publish messages to (supports `{device_id}`) |
+| `--max-connections` | - | `0` | Maximum number of active concurrent connections (`0` = unlimited) |
+| `--messages` | `-m` | `10` | Number of messages published (or received in `sub` mode) per client |
+| `--duration-secs` | `-d` | `0` | Duration (seconds) for time-based soak testing (`0` = use `--messages` count) |
+| `--topic` | `-t` | `sensor/sniper` | MQTT topic to publish or subscribe to (supports `{device_id}`) |
 | `--qos` | `-q` | `0` | MQTT Quality of Service level (`0`, `1`, or `2`) |
+| `--retain` | - | `false` | Publish messages with the MQTT retain flag set |
+| `--keep-alive` | - | `5` | MQTT keep-alive interval in seconds |
 | `--ramp-up-ms` | - | `0` | Delay (ms) before spawning consecutive clients (prevents TCP SYN flood) |
 | `--interval-ms` | `-i` | `0` | Delay (ms) between consecutive messages from the same client |
-| `--payload` | - | `{"device_id": {device_id}, "seq": {seq}, "ts": {timestamp}}` | Custom payload template (supports `{device_id}`, `{seq}`, `{timestamp}`) |
+| `--payload` | - | `{"device_id": {device_id}, "seq": {seq}, "ts": {timestamp}}` | Custom payload template (supports `{device_id}`, `{seq}`, `{timestamp}`, `{random_int}`, `{random_float}`, `{uuid}`) |
 | `--payload-size` | - | `0` | Minimum payload size in bytes (padded with `x` if rendered payload is smaller) |
 | `--username` | `-u` | - | Username for MQTT broker authentication |
 | `--password` | - | - | Password for MQTT broker authentication |
-| `--tls` | - | `false` | Enable SSL/TLS connection (mqtts://) |
+| `--tls` | - | `false` | Enable SSL/TLS connection (`mqtts://`) |
 | `--ca` | - | - | Path to custom CA certificate file (PEM) for TLS verification |
 | `--cert` | - | - | Path to client certificate file (PEM) for mTLS authentication |
 | `--key` | - | - | Path to client private key file (PEM) for mTLS authentication |
@@ -132,6 +144,9 @@ The payload template can be customized via `--payload`, and dynamic variables ar
 - `{device_id}`: Simulated client index (0, 1, 2, ...)
 - `{seq}`: Message sequence number per client
 - `{timestamp}`: Current Unix timestamp in milliseconds
+- `{random_int}`: Random integer between `0` and `100`
+- `{random_float}`: Random floating-point number between `20.00` and `40.00`
+- `{uuid}`: Random RFC 4122 UUID v4 string
 
 Use `--payload-size` to enforce a minimum payload byte size (useful for benchmarking network bandwidth under large packet loads).
 

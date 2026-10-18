@@ -41,17 +41,35 @@ pub async fn run_load_test(args: Args) -> BenchmarkReport {
 
     println!("🚀 Starting MQTT Sniper...");
     println!("Broker: {}://{}:{}", scheme, args.broker, args.port);
-    println!(
-        "Spawning {} concurrent {:?} clients ({} msgs/client, QoS {})...",
-        args.clients, args.mode, args.messages, args.qos
-    );
-
-    let pb = ProgressBar::new(target_messages as u64);
-    if let Ok(style) = ProgressStyle::with_template(
-        "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({percent}%) | {per_sec} | ETA: {eta}",
-    ) {
-        pb.set_style(style.progress_chars("█▓░"));
+    if args.duration_secs > 0 {
+        println!(
+            "Spawning {} concurrent {:?} clients (duration {}s, QoS {})...",
+            args.clients, args.mode, args.duration_secs, args.qos
+        );
+    } else {
+        println!(
+            "Spawning {} concurrent {:?} clients ({} msgs/client, QoS {})...",
+            args.clients, args.mode, args.messages, args.qos
+        );
     }
+
+    let pb = if args.duration_secs > 0 {
+        let spinner = ProgressBar::new_spinner();
+        if let Ok(style) = ProgressStyle::with_template(
+            "{spinner:.green} [{elapsed_precise}] {pos} msgs | {per_sec}",
+        ) {
+            spinner.set_style(style);
+        }
+        spinner
+    } else {
+        let bar = ProgressBar::new(target_messages as u64);
+        if let Ok(style) = ProgressStyle::with_template(
+            "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({percent}%) | {per_sec} | ETA: {eta}",
+        ) {
+            bar.set_style(style.progress_chars("█▓░"));
+        }
+        bar
+    };
 
     let start_time = Instant::now();
     let mut handles = Vec::with_capacity(args.clients);
@@ -77,6 +95,9 @@ pub async fn run_load_test(args: Args) -> BenchmarkReport {
         let port = args.port;
         let mode = args.mode;
         let messages = args.messages;
+        let duration_secs = args.duration_secs;
+        let retain = args.retain;
+        let keep_alive = args.keep_alive;
         let interval_ms = args.interval_ms;
         let username = args.username.clone();
         let password = args.password.clone();
@@ -95,7 +116,7 @@ pub async fn run_load_test(args: Args) -> BenchmarkReport {
 
             let client_id = format!("sniper-client-{}", i);
             let mut mqttoptions = MqttOptions::new(client_id, broker, port);
-            mqttoptions.set_keep_alive(Duration::from_secs(5));
+            mqttoptions.set_keep_alive(Duration::from_secs(keep_alive.max(1)));
             mqttoptions.set_transport(client_transport);
 
             if let Some(ref user) = username {
@@ -110,28 +131,64 @@ pub async fn run_load_test(args: Args) -> BenchmarkReport {
             let worker = tokio::spawn(async move {
                 match mode {
                     Mode::Pub => {
-                        for j in 0..messages {
-                            let payload_bytes =
-                                build_payload(&payload_template, i, j, payload_size);
-                            let _ = tx_time.send(Instant::now());
-                            if client
-                                .publish(topic.as_str(), qos, false, payload_bytes)
-                                .await
-                                .is_err()
-                            {
-                                break;
+                        if duration_secs > 0 {
+                            let deadline = Instant::now() + Duration::from_secs(duration_secs);
+                            let mut j = 0usize;
+                            while Instant::now() < deadline {
+                                let payload_bytes =
+                                    build_payload(&payload_template, i, j, payload_size);
+                                let _ = tx_time.send(Instant::now());
+                                if client
+                                    .publish(topic.as_str(), qos, retain, payload_bytes)
+                                    .await
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                                j += 1;
+                                if interval_ms > 0 {
+                                    let remaining =
+                                        deadline.saturating_duration_since(Instant::now());
+                                    if remaining.is_zero() {
+                                        break;
+                                    }
+                                    tokio::time::sleep(
+                                        Duration::from_millis(interval_ms).min(remaining),
+                                    )
+                                    .await;
+                                } else {
+                                    tokio::task::yield_now().await;
+                                }
                             }
-                            if interval_ms > 0 && j + 1 < messages {
-                                tokio::time::sleep(Duration::from_millis(interval_ms)).await;
-                            }
-                        }
-                        // For QoS 0 (or when 0 messages), disconnect immediately once all messages are queued
-                        if qos == QoS::AtMostOnce || messages == 0 {
                             let _ = client.disconnect().await;
+                        } else {
+                            for j in 0..messages {
+                                let payload_bytes =
+                                    build_payload(&payload_template, i, j, payload_size);
+                                let _ = tx_time.send(Instant::now());
+                                if client
+                                    .publish(topic.as_str(), qos, retain, payload_bytes)
+                                    .await
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                                if interval_ms > 0 && j + 1 < messages {
+                                    tokio::time::sleep(Duration::from_millis(interval_ms)).await;
+                                }
+                            }
+                            // For QoS 0 (or when 0 messages), disconnect immediately once all messages are queued
+                            if qos == QoS::AtMostOnce || messages == 0 {
+                                let _ = client.disconnect().await;
+                            }
                         }
                     }
                     Mode::Sub => {
-                        if messages == 0 {
+                        if duration_secs > 0 {
+                            let _ = client.subscribe(topic.as_str(), qos).await;
+                            tokio::time::sleep(Duration::from_secs(duration_secs)).await;
+                            let _ = client.disconnect().await;
+                        } else if messages == 0 {
                             let _ = client.disconnect().await;
                         } else {
                             let _ = client.subscribe(topic.as_str(), qos).await;
@@ -167,7 +224,7 @@ pub async fn run_load_test(args: Args) -> BenchmarkReport {
                             published_counter.fetch_add(1, Ordering::Relaxed);
                             pb_clone.inc(1);
                             completed_count += 1;
-                            if completed_count == messages {
+                            if duration_secs == 0 && completed_count == messages {
                                 let _ = client_clone.disconnect().await;
                             }
                         }
@@ -180,7 +237,7 @@ pub async fn run_load_test(args: Args) -> BenchmarkReport {
                             published_counter.fetch_add(1, Ordering::Relaxed);
                             pb_clone.inc(1);
                             completed_count += 1;
-                            if completed_count == messages {
+                            if duration_secs == 0 && completed_count == messages {
                                 let _ = client_clone.disconnect().await;
                             }
                         }
@@ -192,7 +249,7 @@ pub async fn run_load_test(args: Args) -> BenchmarkReport {
                         published_counter.fetch_add(1, Ordering::Relaxed);
                         pb_clone.inc(1);
                         completed_count += 1;
-                        if completed_count == messages {
+                        if duration_secs == 0 && completed_count == messages {
                             let _ = client_clone.disconnect().await;
                         }
                     }

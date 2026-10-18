@@ -12,7 +12,9 @@ pub struct BenchmarkReport {
     pub tls: bool,
     pub clients: usize,
     pub messages_per_client: usize,
+    pub duration_secs: u64,
     pub qos: u8,
+    pub retain: bool,
     pub target_messages: usize,
     pub actual_sent: usize,
     pub failed_clients: usize,
@@ -34,7 +36,11 @@ impl BenchmarkReport {
         failed_clients: usize,
         hist: &Histogram<u64>,
     ) -> Self {
-        let target_messages = args.clients * args.messages;
+        let target_messages = if args.duration_secs > 0 {
+            actual_sent
+        } else {
+            args.clients * args.messages
+        };
         let elapsed_secs = elapsed.as_secs_f64();
         let throughput = if elapsed_secs > 0.0 {
             (actual_sent as f64) / elapsed_secs
@@ -64,7 +70,9 @@ impl BenchmarkReport {
             tls: use_tls,
             clients: args.clients,
             messages_per_client: args.messages,
+            duration_secs: args.duration_secs,
             qos: args.qos,
+            retain: args.retain,
             target_messages,
             actual_sent,
             failed_clients,
@@ -85,10 +93,17 @@ impl BenchmarkReport {
             Mode::Sub => "received",
         };
         println!("✅ Load test completed in {:.2?}", elapsed);
-        println!(
-            "📊 Total messages {}: {} / {} (Failed clients: {})",
-            action_label, self.actual_sent, self.target_messages, self.failed_clients
-        );
+        if self.duration_secs > 0 {
+            println!(
+                "📊 Total messages {}: {} (Duration target: {}s, Failed clients: {})",
+                action_label, self.actual_sent, self.duration_secs, self.failed_clients
+            );
+        } else {
+            println!(
+                "📊 Total messages {}: {} / {} (Failed clients: {})",
+                action_label, self.actual_sent, self.target_messages, self.failed_clients
+            );
+        }
         if self.elapsed_secs > 0.0 {
             println!(
                 "⚡ Throughput: {:.2} msgs/sec",

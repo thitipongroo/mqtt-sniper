@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-10-18
+
+### Added
+
+- **Duration-based Soak Testing (`--duration-secs` / `-d`)**: Added time-based benchmark execution mode for both Publish and Subscribe workloads.
+- **Dynamic Random Telemetry Placeholders**: Added `{random_int}` (`0..=100`), `{random_float}` (`20.00..=40.00`), and `{uuid}` (UUID v4) placeholders in payload templates.
+- **Advanced MQTT Protocol Options**: Added `--retain` flag for publishing retained messages and `--keep-alive` for configurable MQTT keep-alive intervals.
+- **Automated Docker Image Publishing (GHCR)**: Added `publish-docker` job in GitHub Actions release workflow to automatically publish `ghcr.io/thitipongroo/mqtt-sniper` container images.
+
 ## [0.3.0] - 2026-10-18
 
 ### Added
