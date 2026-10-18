@@ -17,6 +17,9 @@ MQTT Sniper leverages **Rust** and the **Tokio async runtime** to deliver extrem
 
 - **High Concurrency**: Spawns thousands of independent MQTT clients in milliseconds using Tokio light-weight tasks.
 - **Fearless Performance**: Zero garbage collection pauses, ensuring accurate throughput measurement.
+- **Latency Histogram**: Tracks per-message delivery & ACK round-trip latencies (`min`, `avg`, `p50`, `p95`, `p99`, `max`) using High Dynamic Range (HDR) histograms.
+- **Live Terminal Progress**: Real-time progress bar with live throughput (`msgs/sec`) and ETA tracking.
+- **CI/CD Ready**: Export structured benchmark reports directly to JSON (`--output-json`).
 - **Plug-and-Play**: Compiled to a single native binary, no external runtimes (like JVM or Node) required.
 
 ## 🛠️ Installation & Usage
@@ -57,7 +60,8 @@ Stress-test with custom parameters (e.g., 1,000 clients sending 50 messages each
   --clients 1000 \
   --messages 50 \
   --topic "sensor/telemetry" \
-  --qos 1
+  --qos 1 \
+  --output-json report.json
 ```
 
 ### ⚙️ CLI Options
@@ -76,6 +80,7 @@ Stress-test with custom parameters (e.g., 1,000 clients sending 50 messages each
 | `--payload-size` | - | `0` | Minimum payload size in bytes (padded with `x` if rendered payload is smaller) |
 | `--username` | `-u` | - | Username for MQTT broker authentication |
 | `--password` | - | - | Password for MQTT broker authentication |
+| `--output-json` | - | - | Export benchmark results to a JSON file |
 | `--help` | `-h` | - | Print help information |
 | `--version` | `-V` | - | Print version information |
 
@@ -88,6 +93,7 @@ Each client (`sniper-client-{i}`) publishes JSON payloads to the target topic. B
 ```
 
 The payload template can be customized via `--payload`, and dynamic variables are substituted automatically:
+
 - `{device_id}`: Simulated client index (0, 1, 2, ...)
 - `{seq}`: Message sequence number per client
 - `{timestamp}`: Current Unix timestamp in milliseconds
@@ -103,6 +109,7 @@ Spawning 1000 concurrent clients (50 msgs/client, QoS 0)...
 ✅ Load test completed in 1.42s
 📊 Total messages sent: 50000 / 50000 (Failed clients: 0)
 ⚡ Throughput: 35211.27 msgs/sec
+⏱️  Latency (ms): min=0.42 | avg=3.18 | p50=2.85 | p95=7.40 | p99=12.15 | max=18.90
 ```
 
 ## 🔗 Related Projects in the Ecosystem

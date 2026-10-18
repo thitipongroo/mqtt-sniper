@@ -1,8 +1,14 @@
 use clap::Parser;
+use hdrhistogram::Histogram;
+use indicatif::{ProgressBar, ProgressStyle};
 use rumqttc::{AsyncClient, Event, MqttOptions, Outgoing, Packet, QoS};
+use serde::Serialize;
+use std::collections::HashMap;
+use std::fs;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tokio::sync::mpsc;
 use tokio::task;
 
 // 1. CLI argument parsing structure
@@ -59,6 +65,30 @@ struct Args {
     /// Password for MQTT broker authentication
     #[arg(long)]
     password: Option<String>,
+
+    /// Export benchmark results to a JSON file
+    #[arg(long)]
+    output_json: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct BenchmarkReport {
+    broker: String,
+    port: u16,
+    clients: usize,
+    messages_per_client: usize,
+    qos: u8,
+    target_messages: usize,
+    actual_sent: usize,
+    failed_clients: usize,
+    elapsed_secs: f64,
+    throughput_msgs_per_sec: f64,
+    latency_min_ms: f64,
+    latency_avg_ms: f64,
+    latency_p50_ms: f64,
+    latency_p95_ms: f64,
+    latency_p99_ms: f64,
+    latency_max_ms: f64,
 }
 
 fn parse_qos(qos: u8) -> QoS {
@@ -97,8 +127,9 @@ async fn main() {
     let _ = run_load_test(args).await;
 }
 
-async fn run_load_test(args: Args) -> (Duration, usize, usize) {
+async fn run_load_test(args: Args) -> BenchmarkReport {
     let qos = parse_qos(args.qos);
+    let target_messages = args.clients * args.messages;
 
     println!("🚀 Starting MQTT Sniper...");
     println!("Broker: tcp://{}:{}", args.broker, args.port);
@@ -106,6 +137,13 @@ async fn run_load_test(args: Args) -> (Duration, usize, usize) {
         "Spawning {} concurrent clients ({} msgs/client, QoS {})...",
         args.clients, args.messages, args.qos
     );
+
+    let pb = ProgressBar::new(target_messages as u64);
+    if let Ok(style) = ProgressStyle::with_template(
+        "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({percent}%) | {per_sec} | ETA: {eta}",
+    ) {
+        pb.set_style(style.progress_chars("█▓░"));
+    }
 
     let start_time = Instant::now();
     let mut handles = Vec::with_capacity(args.clients);
@@ -130,6 +168,7 @@ async fn run_load_test(args: Args) -> (Duration, usize, usize) {
         let password = args.password.clone();
         let published_counter = Arc::clone(&published_count);
         let failed_counter = Arc::clone(&failed_clients);
+        let pb_clone = pb.clone();
 
         // Spawn independent task for each simulated client
         let handle = task::spawn(async move {
@@ -143,11 +182,13 @@ async fn run_load_test(args: Args) -> (Duration, usize, usize) {
 
             let (client, mut eventloop) = AsyncClient::new(mqttoptions, 50);
             let client_clone = client.clone();
+            let (tx_time, mut rx_time) = mpsc::unbounded_channel::<Instant>();
 
             // Publish messages asynchronously to the client's request channel
             let publisher = tokio::spawn(async move {
                 for j in 0..messages {
                     let payload_bytes = build_payload(&payload_template, i, j, payload_size);
+                    let _ = tx_time.send(Instant::now());
                     if client
                         .publish(topic.as_str(), qos, false, payload_bytes)
                         .await
@@ -169,25 +210,42 @@ async fn run_load_test(args: Args) -> (Duration, usize, usize) {
             // - For QoS 0: wait until Disconnect is flushed out
             // - For QoS 1/2: wait for all PUBACK / PUBCOMP acknowledgments before disconnecting
             let mut acked_count = 0usize;
+            let mut inflight: HashMap<u16, Instant> = HashMap::new();
+            let mut latencies_us: Vec<u64> = Vec::with_capacity(messages);
+
             loop {
                 match eventloop.poll().await {
-                    Ok(Event::Outgoing(Outgoing::Publish(_))) => {
+                    Ok(Event::Outgoing(Outgoing::Publish(pkid))) => {
                         if qos == QoS::AtMostOnce {
+                            if let Ok(t0) = rx_time.try_recv() {
+                                latencies_us.push(t0.elapsed().as_micros() as u64);
+                            }
                             published_counter.fetch_add(1, Ordering::Relaxed);
+                            pb_clone.inc(1);
+                        } else if let Ok(t0) = rx_time.try_recv() {
+                            inflight.insert(pkid, t0);
                         }
                     }
-                    Ok(Event::Incoming(Packet::PubAck(_))) => {
+                    Ok(Event::Incoming(Packet::PubAck(ack))) => {
                         if qos == QoS::AtLeastOnce {
+                            if let Some(t0) = inflight.remove(&ack.pkid) {
+                                latencies_us.push(t0.elapsed().as_micros() as u64);
+                            }
                             published_counter.fetch_add(1, Ordering::Relaxed);
+                            pb_clone.inc(1);
                             acked_count += 1;
                             if acked_count == messages {
                                 let _ = client_clone.disconnect().await;
                             }
                         }
                     }
-                    Ok(Event::Incoming(Packet::PubComp(_))) => {
+                    Ok(Event::Incoming(Packet::PubComp(comp))) => {
                         if qos == QoS::ExactlyOnce {
+                            if let Some(t0) = inflight.remove(&comp.pkid) {
+                                latencies_us.push(t0.elapsed().as_micros() as u64);
+                            }
                             published_counter.fetch_add(1, Ordering::Relaxed);
+                            pb_clone.inc(1);
                             acked_count += 1;
                             if acked_count == messages {
                                 let _ = client_clone.disconnect().await;
@@ -207,35 +265,93 @@ async fn run_load_test(args: Args) -> (Duration, usize, usize) {
 
             publisher.abort();
             let _ = publisher.await;
+            latencies_us
         });
 
         handles.push(handle);
     }
 
-    // 4. Await completion of all client tasks
+    // 4. Await completion of all client tasks and aggregate latency histogram
+    let mut hist =
+        Histogram::<u64>::new_with_bounds(1, 60_000_000, 3).expect("Failed to create histogram");
+
     for handle in handles {
-        let _ = handle.await;
+        if let Ok(client_latencies) = handle.await {
+            for lat_us in client_latencies {
+                let _ = hist.record(lat_us.clamp(1, 60_000_000));
+            }
+        }
     }
+
+    pb.finish_and_clear();
 
     // 5. Calculate and print benchmark summary
     let elapsed = start_time.elapsed();
-    let target_messages = args.clients * args.messages;
+    let elapsed_secs = elapsed.as_secs_f64();
     let actual_sent = published_count.load(Ordering::Relaxed);
     let errors = failed_clients.load(Ordering::Relaxed);
+    let throughput = if elapsed_secs > 0.0 {
+        (actual_sent as f64) / elapsed_secs
+    } else {
+        0.0
+    };
+
+    let (min_ms, avg_ms, p50_ms, p95_ms, p99_ms, max_ms) = if !hist.is_empty() {
+        (
+            hist.min() as f64 / 1000.0,
+            hist.mean() / 1000.0,
+            hist.value_at_quantile(0.50) as f64 / 1000.0,
+            hist.value_at_quantile(0.95) as f64 / 1000.0,
+            hist.value_at_quantile(0.99) as f64 / 1000.0,
+            hist.max() as f64 / 1000.0,
+        )
+    } else {
+        (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    };
 
     println!("✅ Load test completed in {:.2?}", elapsed);
     println!(
         "📊 Total messages sent: {} / {} (Failed clients: {})",
         actual_sent, target_messages, errors
     );
-    if elapsed.as_secs_f64() > 0.0 {
-        println!(
-            "⚡ Throughput: {:.2} msgs/sec",
-            (actual_sent as f64) / elapsed.as_secs_f64()
-        );
+    if elapsed_secs > 0.0 {
+        println!("⚡ Throughput: {:.2} msgs/sec", throughput);
+    }
+    println!(
+        "⏱️  Latency (ms): min={:.2} | avg={:.2} | p50={:.2} | p95={:.2} | p99={:.2} | max={:.2}",
+        min_ms, avg_ms, p50_ms, p95_ms, p99_ms, max_ms
+    );
+
+    let report = BenchmarkReport {
+        broker: args.broker,
+        port: args.port,
+        clients: args.clients,
+        messages_per_client: args.messages,
+        qos: args.qos,
+        target_messages,
+        actual_sent,
+        failed_clients: errors,
+        elapsed_secs,
+        throughput_msgs_per_sec: throughput,
+        latency_min_ms: min_ms,
+        latency_avg_ms: avg_ms,
+        latency_p50_ms: p50_ms,
+        latency_p95_ms: p95_ms,
+        latency_p99_ms: p99_ms,
+        latency_max_ms: max_ms,
+    };
+
+    if let Some(ref path) = args.output_json
+        && let Ok(json_str) = serde_json::to_string_pretty(&report)
+    {
+        if let Err(e) = fs::write(path, json_str) {
+            eprintln!("⚠️ Failed to write JSON report to {}: {}", path, e);
+        } else {
+            println!("💾 Saved JSON benchmark report to {}", path);
+        }
     }
 
-    (elapsed, actual_sent, errors)
+    report
 }
 
 #[cfg(test)]
@@ -270,6 +386,7 @@ mod tests {
         assert_eq!(args.payload_size, 0);
         assert_eq!(args.username, None);
         assert_eq!(args.password, None);
+        assert_eq!(args.output_json, None);
     }
 
     #[test]
@@ -300,6 +417,8 @@ mod tests {
             "myuser",
             "--password",
             "mypass",
+            "--output-json",
+            "report.json",
         ]);
         assert_eq!(args.broker, "10.0.0.1");
         assert_eq!(args.port, 1884);
@@ -313,6 +432,7 @@ mod tests {
         assert_eq!(args.payload_size, 64);
         assert_eq!(args.username, Some("myuser".to_string()));
         assert_eq!(args.password, Some("mypass".to_string()));
+        assert_eq!(args.output_json, Some("report.json".to_string()));
     }
 
     #[test]
@@ -407,11 +527,13 @@ mod tests {
             payload_size: 0,
             username: None,
             password: None,
+            output_json: None,
         };
 
-        let (_, actual_sent, errors) = run_load_test(args).await;
-        assert_eq!(actual_sent, 6);
-        assert_eq!(errors, 0);
+        let report = run_load_test(args).await;
+        assert_eq!(report.actual_sent, 6);
+        assert_eq!(report.failed_clients, 0);
+        assert!(report.latency_max_ms >= report.latency_min_ms);
     }
 
     #[tokio::test]
@@ -433,11 +555,13 @@ mod tests {
             payload_size: 0,
             username: None,
             password: None,
+            output_json: None,
         };
 
-        let (_, actual_sent, errors) = run_load_test(args).await;
-        assert_eq!(actual_sent, 6);
-        assert_eq!(errors, 0);
+        let report = run_load_test(args).await;
+        assert_eq!(report.actual_sent, 6);
+        assert_eq!(report.failed_clients, 0);
+        assert!(report.latency_p99_ms > 0.0);
     }
 
     #[tokio::test]
@@ -459,10 +583,46 @@ mod tests {
             payload_size: 0,
             username: None,
             password: None,
+            output_json: None,
         };
 
-        let (_, actual_sent, errors) = run_load_test(args).await;
-        assert_eq!(actual_sent, 6);
-        assert_eq!(errors, 0);
+        let report = run_load_test(args).await;
+        assert_eq!(report.actual_sent, 6);
+        assert_eq!(report.failed_clients, 0);
+        assert!(report.latency_p99_ms > 0.0);
+    }
+
+    #[tokio::test]
+    async fn test_json_report_export() {
+        let clients = 1;
+        let messages = 2;
+        let port = start_mock_broker(1, clients).await;
+        let tmp_path = std::env::temp_dir().join("mqtt_sniper_test_report.json");
+        let tmp_path_str = tmp_path.to_str().unwrap().to_string();
+
+        let args = Args {
+            broker: "127.0.0.1".to_string(),
+            port,
+            clients,
+            messages,
+            topic: "test/json".to_string(),
+            qos: 1,
+            ramp_up_ms: 0,
+            interval_ms: 0,
+            payload: "{}".to_string(),
+            payload_size: 0,
+            username: None,
+            password: None,
+            output_json: Some(tmp_path_str.clone()),
+        };
+
+        let report = run_load_test(args).await;
+        assert_eq!(report.actual_sent, 2);
+        assert!(tmp_path.exists());
+
+        let content = fs::read_to_string(&tmp_path).unwrap();
+        assert!(content.contains(r#""actual_sent": 2"#));
+        assert!(content.contains(r#""latency_p99_ms""#));
+        let _ = fs::remove_file(&tmp_path);
     }
 }
