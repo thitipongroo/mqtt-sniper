@@ -35,3 +35,8 @@ jobs:
 
       - name: Build Release Binary
         run: cargo build --release --verbose
+
+      - name: Build and Verify Docker Image
+        run: |
+          docker build -t mqtt-sniper:ci .
+          docker run --rm mqtt-sniper:ci --version

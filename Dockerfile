@@ -1,6 +1,6 @@
 # Stage 1: Build binary
-FROM rust:1.82-alpine AS builder
-RUN apk add --no-cache musl-dev
+FROM rust:alpine AS builder
+RUN apk add --no-cache musl-dev gcc
 WORKDIR /usr/src/mqtt-sniper
 
 # Copy manifests and source
