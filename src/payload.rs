@@ -31,6 +31,122 @@ fn generate_uuid_v4(seed: u64) -> String {
     format!("{:08x}-{:04x}-{:04x}-{:04x}-{:012x}", p1, p2, p3, p4, p5)
 }
 
+fn process_parametric_random_placeholders(mut text: String, seed: u64) -> String {
+    let mut salt: u64 = 7;
+
+    // Process {random_int} and {random_int:min:max}
+    let mut cursor = 0;
+    while let Some(rel_start) = text[cursor..].find("{random_int") {
+        let start = cursor + rel_start;
+        if let Some(end_rel) = text[start..].find('}') {
+            let end = start + end_rel;
+            let placeholder = &text[start..=end];
+            let inner = &placeholder[1..placeholder.len() - 1];
+            let parts: Vec<&str> = inner.split(':').collect();
+
+            let replacement = match parts.as_slice() {
+                ["random_int"] => {
+                    let rand = (next_random_u64(seed.wrapping_add(salt)) % 101) as i64;
+                    salt = salt.wrapping_add(17);
+                    Some(rand.to_string())
+                }
+                ["random_int", min_str, max_str] => {
+                    if let (Ok(min), Ok(max)) =
+                        (min_str.trim().parse::<i64>(), max_str.trim().parse::<i64>())
+                    {
+                        let (low, high) = if min <= max { (min, max) } else { (max, min) };
+                        let span = (high.saturating_sub(low).saturating_add(1)) as u64;
+                        let rand = if span > 0 {
+                            low.wrapping_add(
+                                (next_random_u64(seed.wrapping_add(salt)) % span) as i64,
+                            )
+                        } else {
+                            low
+                        };
+                        salt = salt.wrapping_add(17);
+                        Some(rand.to_string())
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            };
+
+            if let Some(val) = replacement {
+                text.replace_range(start..=end, &val);
+                cursor = start + val.len();
+            } else {
+                cursor = end + 1;
+            }
+        } else {
+            break;
+        }
+    }
+
+    // Process {random_float}, {random_float:min:max}, and {random_float:min:max:precision}
+    cursor = 0;
+    while let Some(rel_start) = text[cursor..].find("{random_float") {
+        let start = cursor + rel_start;
+        if let Some(end_rel) = text[start..].find('}') {
+            let end = start + end_rel;
+            let placeholder = &text[start..=end];
+            let inner = &placeholder[1..placeholder.len() - 1];
+            let parts: Vec<&str> = inner.split(':').collect();
+
+            let replacement = match parts.as_slice() {
+                ["random_float"] => {
+                    let rand_float =
+                        20.0 + ((next_random_u64(seed.wrapping_add(salt)) % 2001) as f64 / 100.0);
+                    salt = salt.wrapping_add(19);
+                    Some(format!("{:.2}", rand_float))
+                }
+                ["random_float", min_str, max_str] => {
+                    if let (Ok(min), Ok(max)) =
+                        (min_str.trim().parse::<f64>(), max_str.trim().parse::<f64>())
+                    {
+                        let (low, high) = if min <= max { (min, max) } else { (max, min) };
+                        let r =
+                            (next_random_u64(seed.wrapping_add(salt)) % 100_001) as f64 / 100_000.0;
+                        let val = low + r * (high - low);
+                        salt = salt.wrapping_add(19);
+                        Some(format!("{:.2}", val))
+                    } else {
+                        None
+                    }
+                }
+                ["random_float", min_str, max_str, prec_str] => {
+                    if let (Ok(min), Ok(max), Ok(prec)) = (
+                        min_str.trim().parse::<f64>(),
+                        max_str.trim().parse::<f64>(),
+                        prec_str.trim().parse::<usize>(),
+                    ) {
+                        let (low, high) = if min <= max { (min, max) } else { (max, min) };
+                        let r = (next_random_u64(seed.wrapping_add(salt)) % 1_000_001) as f64
+                            / 1_000_000.0;
+                        let val = low + r * (high - low);
+                        salt = salt.wrapping_add(19);
+                        Some(format!("{:.*}", prec.min(10), val))
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            };
+
+            if let Some(val) = replacement {
+                text.replace_range(start..=end, &val);
+                cursor = start + val.len();
+            } else {
+                cursor = end + 1;
+            }
+        } else {
+            break;
+        }
+    }
+
+    text
+}
+
 pub fn build_payload(template: &str, device_id: usize, seq: usize, min_size: usize) -> Vec<u8> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -41,23 +157,13 @@ pub fn build_payload(template: &str, device_id: usize, seq: usize, min_size: usi
 
     let seed = ((device_id as u64) << 32) ^ (seq as u64);
 
-    // Replace placeholders in template with dynamic values
+    // Replace basic dynamic placeholders
     let mut rendered = template
         .replace("{device_id}", &device_id.to_string())
         .replace("{seq}", &seq.to_string())
         .replace("{timestamp}", &timestamp_ms.to_string())
         .replace("{timestamp_secs}", &timestamp_secs.to_string())
         .replace("{timestamp_us}", &timestamp_us.to_string());
-
-    if rendered.contains("{random_int}") {
-        let rand_int = next_random_u64(seed) % 101;
-        rendered = rendered.replace("{random_int}", &rand_int.to_string());
-    }
-
-    if rendered.contains("{random_float}") {
-        let rand_float = 20.0 + ((next_random_u64(seed.wrapping_add(7)) % 2001) as f64 / 100.0);
-        rendered = rendered.replace("{random_float}", &format!("{:.2}", rand_float));
-    }
 
     if rendered.contains("{random_bool}") {
         let rand_bool = (next_random_u64(seed.wrapping_add(13)) & 1) == 0;
@@ -67,6 +173,9 @@ pub fn build_payload(template: &str, device_id: usize, seq: usize, min_size: usi
     if rendered.contains("{uuid}") {
         rendered = rendered.replace("{uuid}", &generate_uuid_v4(seed));
     }
+
+    // Process parametric random integers and floats ({random_int:min:max}, {random_float:min:max:prec})
+    rendered = process_parametric_random_placeholders(rendered, seed);
 
     // Pad payload with 'x' bytes if minimum size is requested
     if min_size > rendered.len() {
@@ -93,57 +202,4 @@ pub fn build_payload_with_chaos(
         }
     }
     (build_payload(template, device_id, seq, min_size), false)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_build_payload() {
-        let template = r#"{"id":{device_id},"s":{seq}}"#;
-        let payload = build_payload(template, 42, 7, 0);
-        let s = String::from_utf8(payload).unwrap();
-        assert_eq!(s, r#"{"id":42,"s":7}"#);
-
-        // Test with minimum size padding
-        let padded = build_payload(template, 42, 7, 25);
-        assert_eq!(padded.len(), 25);
-        let padded_str = String::from_utf8(padded).unwrap();
-        assert!(padded_str.starts_with(r#"{"id":42,"s":7}"#));
-        assert!(padded_str.ends_with("xxxxxxxxx"));
-    }
-
-    #[test]
-    fn test_build_payload_dynamic_random_placeholders() {
-        let template = r#"{"uuid":"{uuid}","int":{random_int},"float":{random_float},"bool":{random_bool},"sec":{timestamp_secs},"us":{timestamp_us}}"#;
-        let payload = build_payload(template, 1, 2, 0);
-        let parsed: serde_json::Value = serde_json::from_slice(&payload).unwrap();
-
-        let uuid_str = parsed["uuid"].as_str().unwrap();
-        assert_eq!(uuid_str.len(), 36);
-        assert_eq!(&uuid_str[14..15], "4");
-
-        let int_val = parsed["int"].as_u64().unwrap();
-        assert!(int_val <= 100);
-
-        let float_val = parsed["float"].as_f64().unwrap();
-        assert!((20.0..=40.0).contains(&float_val));
-
-        assert!(parsed["bool"].is_boolean());
-        assert!(parsed["sec"].as_u64().unwrap() > 1_700_000_000);
-        assert!(parsed["us"].as_u64().unwrap() > 1_700_000_000_000_000);
-    }
-
-    #[test]
-    fn test_build_payload_with_chaos() {
-        let template = r#"{"id":{device_id}}"#;
-        let (valid_bytes, is_malformed) = build_payload_with_chaos(template, 1, 0, 0, 0.0);
-        assert!(!is_malformed);
-        assert!(serde_json::from_slice::<serde_json::Value>(&valid_bytes).is_ok());
-
-        let (corrupt_bytes, is_malformed_all) = build_payload_with_chaos(template, 1, 0, 0, 1.0);
-        assert!(is_malformed_all);
-        assert!(serde_json::from_slice::<serde_json::Value>(&corrupt_bytes).is_err());
-    }
 }

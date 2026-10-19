@@ -1,0 +1,15 @@
+{
+  "schema_version": "2.0",
+  "device_id": "sensor-{device_id}",
+  "seq": {seq},
+  "timestamp_ms": {timestamp},
+  "timestamp_secs": {timestamp_secs},
+  "metrics": {
+    "temperature_c": {random_float:85.0:125.0},
+    "vibration_rms": {random_float:4.5:15.0},
+    "power_watt": {random_int:3500:6000},
+    "pressure_kpa": {random_float:300.0:450.0},
+    "overheat_alarm": true
+  },
+  "trace_id": "{uuid}"
+}

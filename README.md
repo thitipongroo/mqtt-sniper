@@ -224,9 +224,18 @@ When publishing payloads via `--payload` or `--payload-file`, MQTT Sniper evalua
 | `{timestamp_secs}` | Integer | Epoch timestamp in seconds | `1713400000` |
 | `{timestamp_us}` | Integer | Epoch timestamp in microseconds | `1713400000000000` |
 | `{random_int}` | Integer | Uniform pseudo-random integer between `0` and `100` | `84` |
-| `{random_float}` | Float | Uniform pseudo-random float between `20.00` and `40.00` | `26.85` |
+| `{random_int:min:max}` | Integer | Uniform pseudo-random integer within inclusive range `min..=max` | `{random_int:2000:5000}` -> `3412` |
+| `{random_float}` | Float | Uniform pseudo-random float between `20.00` and `40.00` (2 decimals) | `26.85` |
+| `{random_float:min:max}` | Float | Uniform pseudo-random float between `min` and `max` (2 decimals) | `{random_float:85.0:120.0}` -> `104.37` |
+| `{random_float:min:max:prec}` | Float | Uniform pseudo-random float between `min` and `max` with `prec` decimals | `{random_float:0.01:0.09:3}` -> `0.048` |
 | `{random_bool}` | Boolean | Random boolean value (`true` or `false`) | `true` |
 | `{uuid}` | String | RFC 4122 UUID v4 unique identifier | `6ba7b810-9dad-11d1-80b4-00c04fd430c8` |
+
+### Ready-to-Use Payload Templates (`examples/`)
+
+* **`examples/telemetry-v2.json`**: Standard multi-metric sensor telemetry.
+* **`examples/device-shadow.json`**: AWS/Azure IoT-style Device Shadow reported state payload.
+* **`examples/anomaly-alert.json`**: High-temperature/vibration anomaly payload designed for AI Alert & Anomaly load triggers.
 
 ### Sample External Payload File (`examples/telemetry-v2.json`)
 
