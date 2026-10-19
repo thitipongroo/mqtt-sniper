@@ -1,9 +1,9 @@
-name: Release & Publish
+name: Release
 
 on:
   push:
     tags:
-      - "v*"
+      - 'v*.*.*'
 
 permissions:
   contents: write
@@ -11,68 +11,88 @@ permissions:
 
 jobs:
   build-binaries:
-    name: Build Release (${{ matrix.target }})
+    name: Build (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
             archive: tar.gz
-          - os: macos-latest
-            target: aarch64-apple-darwin
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
             archive: tar.gz
-          - os: macos-latest
-            target: x86_64-apple-darwin
+            use_cross: true
+          - target: x86_64-apple-darwin
+            os: macos-13
             archive: tar.gz
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
             archive: zip
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - name: Install Rust Toolchain
+      - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
-      - name: Build Release Binary
-        run: cargo build --release --target ${{ matrix.target }}
+      - name: Install cross (for Linux ARM64)
+        if: matrix.use_cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
 
-      - name: Package Binary (Unix)
-        if: matrix.archive == 'tar.gz'
+      - name: Build release binary
+        shell: bash
         run: |
-          cd target/${{ matrix.target }}/release
-          tar -czf ../../../mqtt-sniper-${{ github.ref_name }}-${{ matrix.target }}.tar.gz mqtt-sniper
+          if [ "${{ matrix.use_cross }}" = "true" ]; then
+            cross build --release --target ${{ matrix.target }}
+          else
+            cargo build --release --target ${{ matrix.target }}
+          fi
 
-      - name: Package Binary (Windows)
+      - name: Package Unix binary (.tar.gz)
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/mqtt-sniper dist/
+          cp README.md LICENSE dist/
+          tar -czf mqtt-sniper-${{ github.ref_name }}-${{ matrix.target }}.tar.gz -C dist .
+
+      - name: Package Windows binary (.zip)
         if: matrix.archive == 'zip'
         shell: pwsh
         run: |
-          Compress-Archive -Path target/${{ matrix.target }}/release/mqtt-sniper.exe -DestinationPath mqtt-sniper-${{ github.ref_name }}-${{ matrix.target }}.zip
+          New-Item -ItemType Directory -Force -Path dist
+          Copy-Item target/${{ matrix.target }}/release/mqtt-sniper.exe dist/
+          Copy-Item README.md, LICENSE dist/
+          Compress-Archive -Path dist/* -DestinationPath mqtt-sniper-${{ github.ref_name }}-${{ matrix.target }}.zip
 
-      - name: Upload to GitHub Release
+      - name: Upload release asset
         uses: softprops/action-gh-release@v2
         with:
-          files: mqtt-sniper-${{ github.ref_name }}-${{ matrix.target }}.${{ matrix.archive }}
-
-  publish-crate:
-    name: Publish to Crates.io
-    needs: build-binaries
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Publish to crates.io
-        run: cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          files: |
+            mqtt-sniper-${{ github.ref_name }}-${{ matrix.target }}.*
+          generate_release_notes: true
 
   publish-docker:
-    name: Publish Docker Image (GHCR)
-    needs: build-binaries
+    name: Publish Multi-Arch Docker Image (GHCR)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
@@ -81,9 +101,21 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and Push Docker Image
-        run: |
-          IMAGE_NAME=$(echo "ghcr.io/${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
-          docker build -t "${IMAGE_NAME}:${{ github.ref_name }}" -t "${IMAGE_NAME}:latest" .
-          docker push "${IMAGE_NAME}:${{ github.ref_name }}"
-          docker push "${IMAGE_NAME}:latest"
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+
+      - name: Build and push Multi-Arch Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}

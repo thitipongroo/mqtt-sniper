@@ -3,13 +3,42 @@ use crate::payload::build_payload_with_chaos;
 use crate::report::BenchmarkReport;
 use hdrhistogram::Histogram;
 use indicatif::{ProgressBar, ProgressStyle};
-use rumqttc::{AsyncClient, Event, MqttOptions, Outgoing, Packet, QoS};
+use rumqttc::{AsyncClient, Event, MqttOptions, Outgoing, Packet, QoS, Transport};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Semaphore, mpsc, watch};
 use tokio::task;
+
+struct ClientSpawnContext {
+    device_id: usize,
+    client_id: String,
+    broker: String,
+    port: u16,
+    mode: Mode,
+    qos_num: u8,
+    topic: String,
+    payload_template: String,
+    payload_size: usize,
+    malformed_rate: f64,
+    messages: usize,
+    duration_secs: u64,
+    retain: bool,
+    clean_session: bool,
+    keep_alive: u64,
+    interval_ms: u64,
+    username: Option<String>,
+    password: Option<String>,
+    client_transport: Transport,
+    published_counter: Arc<AtomicUsize>,
+    malformed_counter: Arc<AtomicUsize>,
+    failed_counter: Arc<AtomicUsize>,
+    pb_clone: ProgressBar,
+    sem_clone: Option<Arc<Semaphore>>,
+    worker_shutdown: watch::Receiver<bool>,
+    loop_shutdown: watch::Receiver<bool>,
+}
 
 fn extract_payload_latency_us(payload: &[u8], fallback_start: Instant) -> u64 {
     if let Ok(val) = serde_json::from_slice::<serde_json::Value>(payload)
@@ -39,8 +68,509 @@ fn extract_payload_latency_us(payload: &[u8], fallback_start: Instant) -> u64 {
     fallback_start.elapsed().as_micros() as u64
 }
 
+async fn run_client_v3(ctx: ClientSpawnContext) -> Histogram<u64> {
+    let ClientSpawnContext {
+        device_id,
+        client_id,
+        broker,
+        port,
+        mode,
+        qos_num,
+        topic,
+        payload_template,
+        payload_size,
+        malformed_rate,
+        messages,
+        duration_secs,
+        retain,
+        clean_session,
+        keep_alive,
+        interval_ms,
+        username,
+        password,
+        client_transport,
+        published_counter,
+        malformed_counter,
+        failed_counter,
+        pb_clone,
+        sem_clone,
+        mut worker_shutdown,
+        mut loop_shutdown,
+    } = ctx;
+
+    let qos = parse_qos(qos_num);
+    let _permit = match sem_clone {
+        Some(ref sem) => sem.acquire().await.ok(),
+        None => None,
+    };
+
+    let mut mqttoptions = MqttOptions::new(client_id, broker, port);
+    mqttoptions.set_keep_alive(Duration::from_secs(keep_alive.max(1)));
+    mqttoptions.set_clean_session(clean_session);
+    mqttoptions.set_transport(client_transport);
+
+    if let Some(ref user) = username {
+        mqttoptions.set_credentials(user, password.as_deref().unwrap_or(""));
+    }
+
+    let connect_start = Instant::now();
+    let (client, mut eventloop) = AsyncClient::new(mqttoptions, 50);
+    let client_clone = client.clone();
+    let (tx_time, mut rx_time) = mpsc::unbounded_channel::<Instant>();
+
+    let worker = tokio::spawn(async move {
+        match mode {
+            Mode::Pub => {
+                if duration_secs > 0 {
+                    let deadline = Instant::now() + Duration::from_secs(duration_secs);
+                    let mut j = 0usize;
+                    while Instant::now() < deadline && !*worker_shutdown.borrow() {
+                        let (payload_bytes, is_malformed) = build_payload_with_chaos(
+                            &payload_template,
+                            device_id,
+                            j,
+                            payload_size,
+                            malformed_rate,
+                        );
+                        if is_malformed {
+                            malformed_counter.fetch_add(1, Ordering::Relaxed);
+                        }
+                        let _ = tx_time.send(Instant::now());
+                        if client
+                            .publish(topic.as_str(), qos, retain, payload_bytes)
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                        j += 1;
+                        if interval_ms > 0 {
+                            let remaining = deadline.saturating_duration_since(Instant::now());
+                            if remaining.is_zero() {
+                                break;
+                            }
+                            tokio::select! {
+                                _ = tokio::time::sleep(Duration::from_millis(interval_ms).min(remaining)) => {}
+                                _ = worker_shutdown.changed() => break,
+                            }
+                        } else {
+                            tokio::task::yield_now().await;
+                        }
+                    }
+                    let _ = client.disconnect().await;
+                } else {
+                    for j in 0..messages {
+                        if *worker_shutdown.borrow() {
+                            break;
+                        }
+                        let (payload_bytes, is_malformed) = build_payload_with_chaos(
+                            &payload_template,
+                            device_id,
+                            j,
+                            payload_size,
+                            malformed_rate,
+                        );
+                        if is_malformed {
+                            malformed_counter.fetch_add(1, Ordering::Relaxed);
+                        }
+                        let _ = tx_time.send(Instant::now());
+                        if client
+                            .publish(topic.as_str(), qos, retain, payload_bytes)
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                        if interval_ms > 0 && j + 1 < messages {
+                            tokio::select! {
+                                _ = tokio::time::sleep(Duration::from_millis(interval_ms)) => {}
+                                _ = worker_shutdown.changed() => break,
+                            }
+                        }
+                    }
+                    if qos == QoS::AtMostOnce || messages == 0 || *worker_shutdown.borrow() {
+                        let _ = client.disconnect().await;
+                    }
+                }
+            }
+            Mode::Sub => {
+                if duration_secs > 0 {
+                    if client.subscribe(topic.as_str(), qos).await.is_ok() {
+                        tokio::select! {
+                            _ = tokio::time::sleep(Duration::from_secs(duration_secs)) => {}
+                            _ = worker_shutdown.changed() => {}
+                        }
+                    }
+                    let _ = client.disconnect().await;
+                } else if messages == 0 {
+                    let _ = client.disconnect().await;
+                } else {
+                    let _ = client.subscribe(topic.as_str(), qos).await;
+                }
+            }
+            Mode::Conn => {
+                if duration_secs > 0 {
+                    tokio::select! {
+                        _ = tokio::time::sleep(Duration::from_secs(duration_secs)) => {}
+                        _ = worker_shutdown.changed() => {}
+                    }
+                    let _ = client.disconnect().await;
+                }
+            }
+        }
+    });
+
+    let mut completed_count = 0usize;
+    let mut inflight: HashMap<u16, Instant> = HashMap::new();
+    let mut client_hist = Histogram::<u64>::new_with_bounds(1, 60_000_000, 3)
+        .expect("Failed to create client histogram");
+    let mut last_recv = Instant::now();
+
+    loop {
+        tokio::select! {
+            biased;
+            _ = loop_shutdown.changed() => {
+                let _ = client_clone.disconnect().await;
+                break;
+            }
+            poll_res = eventloop.poll() => {
+                match poll_res {
+                    Ok(Event::Incoming(Packet::ConnAck(_))) if mode == Mode::Conn => {
+                        let lat_us = (connect_start.elapsed().as_micros() as u64).clamp(1, 60_000_000);
+                        let _ = client_hist.record(lat_us);
+                        published_counter.fetch_add(1, Ordering::Relaxed);
+                        pb_clone.inc(1);
+                        if duration_secs == 0 {
+                            let _ = client_clone.disconnect().await;
+                        }
+                    }
+                    Ok(Event::Outgoing(Outgoing::Publish(pkid))) if mode == Mode::Pub => {
+                        if qos == QoS::AtMostOnce {
+                            if let Ok(t0) = rx_time.try_recv() {
+                                let lat_us = (t0.elapsed().as_micros() as u64).clamp(1, 60_000_000);
+                                let _ = client_hist.record(lat_us);
+                            }
+                            published_counter.fetch_add(1, Ordering::Relaxed);
+                            pb_clone.inc(1);
+                        } else if let Ok(t0) = rx_time.try_recv() {
+                            inflight.insert(pkid, t0);
+                        }
+                    }
+                    Ok(Event::Incoming(Packet::PubAck(ack))) if mode == Mode::Pub => {
+                        if qos == QoS::AtLeastOnce {
+                            if let Some(t0) = inflight.remove(&ack.pkid) {
+                                let lat_us = (t0.elapsed().as_micros() as u64).clamp(1, 60_000_000);
+                                let _ = client_hist.record(lat_us);
+                            }
+                            published_counter.fetch_add(1, Ordering::Relaxed);
+                            pb_clone.inc(1);
+                            completed_count += 1;
+                            if duration_secs == 0 && completed_count == messages {
+                                let _ = client_clone.disconnect().await;
+                            }
+                        }
+                    }
+                    Ok(Event::Incoming(Packet::PubComp(comp))) if mode == Mode::Pub => {
+                        if qos == QoS::ExactlyOnce {
+                            if let Some(t0) = inflight.remove(&comp.pkid) {
+                                let lat_us = (t0.elapsed().as_micros() as u64).clamp(1, 60_000_000);
+                                let _ = client_hist.record(lat_us);
+                            }
+                            published_counter.fetch_add(1, Ordering::Relaxed);
+                            pb_clone.inc(1);
+                            completed_count += 1;
+                            if duration_secs == 0 && completed_count == messages {
+                                let _ = client_clone.disconnect().await;
+                            }
+                        }
+                    }
+                    Ok(Event::Incoming(Packet::Publish(publish))) if mode == Mode::Sub => {
+                        let lat_us = extract_payload_latency_us(&publish.payload, last_recv)
+                            .clamp(1, 60_000_000);
+                        last_recv = Instant::now();
+                        let _ = client_hist.record(lat_us);
+                        published_counter.fetch_add(1, Ordering::Relaxed);
+                        pb_clone.inc(1);
+                        completed_count += 1;
+                        if duration_secs == 0 && completed_count == messages {
+                            let _ = client_clone.disconnect().await;
+                        }
+                    }
+                    Ok(Event::Outgoing(Outgoing::Disconnect)) => {
+                        break;
+                    }
+                    Ok(_) => {}
+                    Err(_) => {
+                        failed_counter.fetch_add(1, Ordering::Relaxed);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    worker.abort();
+    let _ = worker.await;
+    client_hist
+}
+
+async fn run_client_v5(ctx: ClientSpawnContext) -> Histogram<u64> {
+    use rumqttc::v5::mqttbytes::QoS as QoS5;
+    use rumqttc::v5::mqttbytes::v5::Packet as Packet5;
+    use rumqttc::v5::{AsyncClient as AsyncClient5, Event as Event5, MqttOptions as MqttOptions5};
+
+    let ClientSpawnContext {
+        device_id,
+        client_id,
+        broker,
+        port,
+        mode,
+        qos_num,
+        topic,
+        payload_template,
+        payload_size,
+        malformed_rate,
+        messages,
+        duration_secs,
+        retain,
+        clean_session,
+        keep_alive,
+        interval_ms,
+        username,
+        password,
+        client_transport,
+        published_counter,
+        malformed_counter,
+        failed_counter,
+        pb_clone,
+        sem_clone,
+        mut worker_shutdown,
+        mut loop_shutdown,
+    } = ctx;
+
+    let qos = match qos_num {
+        0 => QoS5::AtMostOnce,
+        1 => QoS5::AtLeastOnce,
+        2 => QoS5::ExactlyOnce,
+        _ => QoS5::AtMostOnce,
+    };
+
+    let _permit = match sem_clone {
+        Some(ref sem) => sem.acquire().await.ok(),
+        None => None,
+    };
+
+    let mut mqttoptions = MqttOptions5::new(client_id, broker, port);
+    mqttoptions.set_keep_alive(Duration::from_secs(keep_alive.max(5)));
+    mqttoptions.set_clean_start(clean_session);
+    mqttoptions.set_transport(client_transport);
+
+    if let Some(ref user) = username {
+        mqttoptions.set_credentials(user, password.as_deref().unwrap_or(""));
+    }
+
+    let connect_start = Instant::now();
+    let (client, mut eventloop) = AsyncClient5::new(mqttoptions, 50);
+    let client_clone = client.clone();
+    let (tx_time, mut rx_time) = mpsc::unbounded_channel::<Instant>();
+
+    let worker = tokio::spawn(async move {
+        match mode {
+            Mode::Pub => {
+                if duration_secs > 0 {
+                    let deadline = Instant::now() + Duration::from_secs(duration_secs);
+                    let mut j = 0usize;
+                    while Instant::now() < deadline && !*worker_shutdown.borrow() {
+                        let (payload_bytes, is_malformed) = build_payload_with_chaos(
+                            &payload_template,
+                            device_id,
+                            j,
+                            payload_size,
+                            malformed_rate,
+                        );
+                        if is_malformed {
+                            malformed_counter.fetch_add(1, Ordering::Relaxed);
+                        }
+                        let _ = tx_time.send(Instant::now());
+                        if client
+                            .publish(topic.as_str(), qos, retain, payload_bytes)
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                        j += 1;
+                        if interval_ms > 0 {
+                            let remaining = deadline.saturating_duration_since(Instant::now());
+                            if remaining.is_zero() {
+                                break;
+                            }
+                            tokio::select! {
+                                _ = tokio::time::sleep(Duration::from_millis(interval_ms).min(remaining)) => {}
+                                _ = worker_shutdown.changed() => break,
+                            }
+                        } else {
+                            tokio::task::yield_now().await;
+                        }
+                    }
+                    let _ = client.disconnect().await;
+                } else {
+                    for j in 0..messages {
+                        if *worker_shutdown.borrow() {
+                            break;
+                        }
+                        let (payload_bytes, is_malformed) = build_payload_with_chaos(
+                            &payload_template,
+                            device_id,
+                            j,
+                            payload_size,
+                            malformed_rate,
+                        );
+                        if is_malformed {
+                            malformed_counter.fetch_add(1, Ordering::Relaxed);
+                        }
+                        let _ = tx_time.send(Instant::now());
+                        if client
+                            .publish(topic.as_str(), qos, retain, payload_bytes)
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                        if interval_ms > 0 && j + 1 < messages {
+                            tokio::select! {
+                                _ = tokio::time::sleep(Duration::from_millis(interval_ms)) => {}
+                                _ = worker_shutdown.changed() => break,
+                            }
+                        }
+                    }
+                    if qos == QoS5::AtMostOnce || messages == 0 || *worker_shutdown.borrow() {
+                        let _ = client.disconnect().await;
+                    }
+                }
+            }
+            Mode::Sub => {
+                if duration_secs > 0 {
+                    if client.subscribe(topic.as_str(), qos).await.is_ok() {
+                        tokio::select! {
+                            _ = tokio::time::sleep(Duration::from_secs(duration_secs)) => {}
+                            _ = worker_shutdown.changed() => {}
+                        }
+                    }
+                    let _ = client.disconnect().await;
+                } else if messages == 0 {
+                    let _ = client.disconnect().await;
+                } else {
+                    let _ = client.subscribe(topic.as_str(), qos).await;
+                }
+            }
+            Mode::Conn => {
+                if duration_secs > 0 {
+                    tokio::select! {
+                        _ = tokio::time::sleep(Duration::from_secs(duration_secs)) => {}
+                        _ = worker_shutdown.changed() => {}
+                    }
+                    let _ = client.disconnect().await;
+                }
+            }
+        }
+    });
+
+    let mut completed_count = 0usize;
+    let mut inflight: HashMap<u16, Instant> = HashMap::new();
+    let mut client_hist = Histogram::<u64>::new_with_bounds(1, 60_000_000, 3)
+        .expect("Failed to create client histogram");
+    let mut last_recv = Instant::now();
+
+    loop {
+        tokio::select! {
+            biased;
+            _ = loop_shutdown.changed() => {
+                let _ = client_clone.disconnect().await;
+                break;
+            }
+            poll_res = eventloop.poll() => {
+                match poll_res {
+                    Ok(Event5::Incoming(Packet5::ConnAck(_))) if mode == Mode::Conn => {
+                        let lat_us = (connect_start.elapsed().as_micros() as u64).clamp(1, 60_000_000);
+                        let _ = client_hist.record(lat_us);
+                        published_counter.fetch_add(1, Ordering::Relaxed);
+                        pb_clone.inc(1);
+                        if duration_secs == 0 {
+                            let _ = client_clone.disconnect().await;
+                        }
+                    }
+                    Ok(Event5::Outgoing(Outgoing::Publish(pkid))) if mode == Mode::Pub => {
+                        if qos == QoS5::AtMostOnce {
+                            if let Ok(t0) = rx_time.try_recv() {
+                                let lat_us = (t0.elapsed().as_micros() as u64).clamp(1, 60_000_000);
+                                let _ = client_hist.record(lat_us);
+                            }
+                            published_counter.fetch_add(1, Ordering::Relaxed);
+                            pb_clone.inc(1);
+                        } else if let Ok(t0) = rx_time.try_recv() {
+                            inflight.insert(pkid, t0);
+                        }
+                    }
+                    Ok(Event5::Incoming(Packet5::PubAck(ack))) if mode == Mode::Pub => {
+                        if qos == QoS5::AtLeastOnce {
+                            if let Some(t0) = inflight.remove(&ack.pkid) {
+                                let lat_us = (t0.elapsed().as_micros() as u64).clamp(1, 60_000_000);
+                                let _ = client_hist.record(lat_us);
+                            }
+                            published_counter.fetch_add(1, Ordering::Relaxed);
+                            pb_clone.inc(1);
+                            completed_count += 1;
+                            if duration_secs == 0 && completed_count == messages {
+                                let _ = client_clone.disconnect().await;
+                            }
+                        }
+                    }
+                    Ok(Event5::Incoming(Packet5::PubComp(comp))) if mode == Mode::Pub => {
+                        if qos == QoS5::ExactlyOnce {
+                            if let Some(t0) = inflight.remove(&comp.pkid) {
+                                let lat_us = (t0.elapsed().as_micros() as u64).clamp(1, 60_000_000);
+                                let _ = client_hist.record(lat_us);
+                            }
+                            published_counter.fetch_add(1, Ordering::Relaxed);
+                            pb_clone.inc(1);
+                            completed_count += 1;
+                            if duration_secs == 0 && completed_count == messages {
+                                let _ = client_clone.disconnect().await;
+                            }
+                        }
+                    }
+                    Ok(Event5::Incoming(Packet5::Publish(publish))) if mode == Mode::Sub => {
+                        let lat_us = extract_payload_latency_us(&publish.payload, last_recv)
+                            .clamp(1, 60_000_000);
+                        last_recv = Instant::now();
+                        let _ = client_hist.record(lat_us);
+                        published_counter.fetch_add(1, Ordering::Relaxed);
+                        pb_clone.inc(1);
+                        completed_count += 1;
+                        if duration_secs == 0 && completed_count == messages {
+                            let _ = client_clone.disconnect().await;
+                        }
+                    }
+                    Ok(Event5::Outgoing(Outgoing::Disconnect)) => {
+                        break;
+                    }
+                    Ok(_) => {}
+                    Err(_) => {
+                        failed_counter.fetch_add(1, Ordering::Relaxed);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    worker.abort();
+    let _ = worker.await;
+    client_hist
+}
+
 pub async fn run_load_test(args: Args) -> BenchmarkReport {
-    let qos = parse_qos(args.qos);
     let target_messages = if args.mode == Mode::Conn {
         args.clients
     } else {
@@ -59,8 +589,13 @@ pub async fn run_load_test(args: Args) -> BenchmarkReport {
     } else {
         "tcp"
     };
+    let proto_label = if args.mqtt_version == 5 {
+        "v5.0"
+    } else {
+        "v3.1.1"
+    };
 
-    println!("🚀 Starting MQTT Sniper...");
+    println!("🚀 Starting MQTT Sniper (MQTT {})...", proto_label);
     println!("Broker: {}://{}:{}", scheme, args.broker, args.port);
     if args.mode == Mode::Conn {
         println!(
@@ -119,13 +654,11 @@ pub async fn run_load_test(args: Args) -> BenchmarkReport {
         None
     };
 
-    // Spawn concurrent client tasks
     for i in 0..args.clients {
         if *shutdown_tx.borrow() {
             break;
         }
 
-        // Apply ramp-up delay before spawning the next client if configured
         if args.ramp_up_ms > 0 && i > 0 {
             let mut ramp_rx = shutdown_rx.clone();
             tokio::select! {
@@ -136,262 +669,53 @@ pub async fn run_load_test(args: Args) -> BenchmarkReport {
 
         let device_id = args.start_number + i;
         let device_id_str = device_id.to_string();
-        let broker = args.broker.clone();
-        let topic = args.topic.replace("{device_id}", &device_id_str);
-        let client_id = format!("{}{}", args.client_prefix, device_id);
-        let payload_template = resolved_payload.clone();
-        let payload_size = args.payload_size;
-        let malformed_rate = args.malformed_rate;
-        let port = args.port;
-        let mode = args.mode;
-        let messages = args.messages;
-        let duration_secs = args.duration_secs;
-        let retain = args.retain;
-        let clean_session = args.clean_session;
-        let keep_alive = args.keep_alive;
-        let interval_ms = args.interval_ms;
-        let username = args
-            .username
-            .as_ref()
-            .map(|u| u.replace("{device_id}", &device_id_str));
-        let password = args
-            .password
-            .as_ref()
-            .map(|p| p.replace("{device_id}", &device_id_str));
-        let client_transport = transport.clone();
-        let published_counter = Arc::clone(&published_count);
-        let malformed_counter = Arc::clone(&malformed_count);
-        let failed_counter = Arc::clone(&failed_clients);
-        let pb_clone = pb.clone();
-        let sem_clone = semaphore.clone();
-        let mut worker_shutdown = shutdown_rx.clone();
-        let mut loop_shutdown = shutdown_rx.clone();
+        let mqtt_version = args.mqtt_version;
+        let ctx = ClientSpawnContext {
+            device_id,
+            client_id: format!("{}{}", args.client_prefix, device_id),
+            broker: args.broker.clone(),
+            port: args.port,
+            mode: args.mode,
+            qos_num: args.qos,
+            topic: args.topic.replace("{device_id}", &device_id_str),
+            payload_template: resolved_payload.clone(),
+            payload_size: args.payload_size,
+            malformed_rate: args.malformed_rate,
+            messages: args.messages,
+            duration_secs: args.duration_secs,
+            retain: args.retain,
+            clean_session: args.clean_session,
+            keep_alive: args.keep_alive,
+            interval_ms: args.interval_ms,
+            username: args
+                .username
+                .as_ref()
+                .map(|u| u.replace("{device_id}", &device_id_str)),
+            password: args
+                .password
+                .as_ref()
+                .map(|p| p.replace("{device_id}", &device_id_str)),
+            client_transport: transport.clone(),
+            published_counter: Arc::clone(&published_count),
+            malformed_counter: Arc::clone(&malformed_count),
+            failed_counter: Arc::clone(&failed_clients),
+            pb_clone: pb.clone(),
+            sem_clone: semaphore.clone(),
+            worker_shutdown: shutdown_rx.clone(),
+            loop_shutdown: shutdown_rx.clone(),
+        };
 
-        // Spawn independent task for each simulated client
         let handle = task::spawn(async move {
-            let _permit = match sem_clone {
-                Some(ref sem) => sem.acquire().await.ok(),
-                None => None,
-            };
-
-            let mut mqttoptions = MqttOptions::new(client_id, broker, port);
-            mqttoptions.set_keep_alive(Duration::from_secs(keep_alive.max(1)));
-            mqttoptions.set_clean_session(clean_session);
-            mqttoptions.set_transport(client_transport);
-
-            if let Some(ref user) = username {
-                mqttoptions.set_credentials(user, password.as_deref().unwrap_or(""));
+            if mqtt_version == 5 {
+                run_client_v5(ctx).await
+            } else {
+                run_client_v3(ctx).await
             }
-
-            let connect_start = Instant::now();
-            let (client, mut eventloop) = AsyncClient::new(mqttoptions, 50);
-            let client_clone = client.clone();
-            let (tx_time, mut rx_time) = mpsc::unbounded_channel::<Instant>();
-
-            // Worker task for Publish, Subscribe, or Connection hold action
-            let worker = tokio::spawn(async move {
-                match mode {
-                    Mode::Pub => {
-                        if duration_secs > 0 {
-                            let deadline = Instant::now() + Duration::from_secs(duration_secs);
-                            let mut j = 0usize;
-                            while Instant::now() < deadline && !*worker_shutdown.borrow() {
-                                let (payload_bytes, is_malformed) = build_payload_with_chaos(
-                                    &payload_template,
-                                    device_id,
-                                    j,
-                                    payload_size,
-                                    malformed_rate,
-                                );
-                                if is_malformed {
-                                    malformed_counter.fetch_add(1, Ordering::Relaxed);
-                                }
-                                let _ = tx_time.send(Instant::now());
-                                if client
-                                    .publish(topic.as_str(), qos, retain, payload_bytes)
-                                    .await
-                                    .is_err()
-                                {
-                                    break;
-                                }
-                                j += 1;
-                                if interval_ms > 0 {
-                                    let remaining =
-                                        deadline.saturating_duration_since(Instant::now());
-                                    if remaining.is_zero() {
-                                        break;
-                                    }
-                                    tokio::select! {
-                                        _ = tokio::time::sleep(Duration::from_millis(interval_ms).min(remaining)) => {}
-                                        _ = worker_shutdown.changed() => break,
-                                    }
-                                } else {
-                                    tokio::task::yield_now().await;
-                                }
-                            }
-                            let _ = client.disconnect().await;
-                        } else {
-                            for j in 0..messages {
-                                if *worker_shutdown.borrow() {
-                                    break;
-                                }
-                                let (payload_bytes, is_malformed) = build_payload_with_chaos(
-                                    &payload_template,
-                                    device_id,
-                                    j,
-                                    payload_size,
-                                    malformed_rate,
-                                );
-                                if is_malformed {
-                                    malformed_counter.fetch_add(1, Ordering::Relaxed);
-                                }
-                                let _ = tx_time.send(Instant::now());
-                                if client
-                                    .publish(topic.as_str(), qos, retain, payload_bytes)
-                                    .await
-                                    .is_err()
-                                {
-                                    break;
-                                }
-                                if interval_ms > 0 && j + 1 < messages {
-                                    tokio::select! {
-                                        _ = tokio::time::sleep(Duration::from_millis(interval_ms)) => {}
-                                        _ = worker_shutdown.changed() => break,
-                                    }
-                                }
-                            }
-                            // For QoS 0 (or when 0 messages or interrupted), disconnect once queued
-                            if qos == QoS::AtMostOnce || messages == 0 || *worker_shutdown.borrow()
-                            {
-                                let _ = client.disconnect().await;
-                            }
-                        }
-                    }
-                    Mode::Sub => {
-                        if duration_secs > 0 {
-                            let _ = client.subscribe(topic.as_str(), qos).await;
-                            tokio::select! {
-                                _ = tokio::time::sleep(Duration::from_secs(duration_secs)) => {}
-                                _ = worker_shutdown.changed() => {}
-                            }
-                            let _ = client.disconnect().await;
-                        } else if messages == 0 {
-                            let _ = client.disconnect().await;
-                        } else {
-                            let _ = client.subscribe(topic.as_str(), qos).await;
-                        }
-                    }
-                    Mode::Conn => {
-                        if duration_secs > 0 {
-                            tokio::select! {
-                                _ = tokio::time::sleep(Duration::from_secs(duration_secs)) => {}
-                                _ = worker_shutdown.changed() => {}
-                            }
-                            let _ = client.disconnect().await;
-                        }
-                    }
-                }
-            });
-
-            // Poll eventloop to drive network I/O using bounded O(1) per-client HDR Histogram
-            let mut completed_count = 0usize;
-            let mut inflight: HashMap<u16, Instant> = HashMap::new();
-            let mut client_hist = Histogram::<u64>::new_with_bounds(1, 60_000_000, 3)
-                .expect("Failed to create client histogram");
-            let mut last_recv = Instant::now();
-
-            loop {
-                tokio::select! {
-                    biased;
-                    _ = loop_shutdown.changed() => {
-                        let _ = client_clone.disconnect().await;
-                        break;
-                    }
-                    poll_res = eventloop.poll() => {
-                        match poll_res {
-                            Ok(Event::Incoming(Packet::ConnAck(_))) if mode == Mode::Conn => {
-                                let lat_us = (connect_start.elapsed().as_micros() as u64).clamp(1, 60_000_000);
-                                let _ = client_hist.record(lat_us);
-                                published_counter.fetch_add(1, Ordering::Relaxed);
-                                pb_clone.inc(1);
-                                if duration_secs == 0 {
-                                    let _ = client_clone.disconnect().await;
-                                }
-                            }
-                            Ok(Event::Outgoing(Outgoing::Publish(pkid))) if mode == Mode::Pub => {
-                                if qos == QoS::AtMostOnce {
-                                    if let Ok(t0) = rx_time.try_recv() {
-                                        let lat_us = (t0.elapsed().as_micros() as u64).clamp(1, 60_000_000);
-                                        let _ = client_hist.record(lat_us);
-                                    }
-                                    published_counter.fetch_add(1, Ordering::Relaxed);
-                                    pb_clone.inc(1);
-                                } else if let Ok(t0) = rx_time.try_recv() {
-                                    inflight.insert(pkid, t0);
-                                }
-                            }
-                            Ok(Event::Incoming(Packet::PubAck(ack))) if mode == Mode::Pub => {
-                                if qos == QoS::AtLeastOnce {
-                                    if let Some(t0) = inflight.remove(&ack.pkid) {
-                                        let lat_us = (t0.elapsed().as_micros() as u64).clamp(1, 60_000_000);
-                                        let _ = client_hist.record(lat_us);
-                                    }
-                                    published_counter.fetch_add(1, Ordering::Relaxed);
-                                    pb_clone.inc(1);
-                                    completed_count += 1;
-                                    if duration_secs == 0 && completed_count == messages {
-                                        let _ = client_clone.disconnect().await;
-                                    }
-                                }
-                            }
-                            Ok(Event::Incoming(Packet::PubComp(comp))) if mode == Mode::Pub => {
-                                if qos == QoS::ExactlyOnce {
-                                    if let Some(t0) = inflight.remove(&comp.pkid) {
-                                        let lat_us = (t0.elapsed().as_micros() as u64).clamp(1, 60_000_000);
-                                        let _ = client_hist.record(lat_us);
-                                    }
-                                    published_counter.fetch_add(1, Ordering::Relaxed);
-                                    pb_clone.inc(1);
-                                    completed_count += 1;
-                                    if duration_secs == 0 && completed_count == messages {
-                                        let _ = client_clone.disconnect().await;
-                                    }
-                                }
-                            }
-                            Ok(Event::Incoming(Packet::Publish(publish))) if mode == Mode::Sub => {
-                                let lat_us = extract_payload_latency_us(&publish.payload, last_recv)
-                                    .clamp(1, 60_000_000);
-                                last_recv = Instant::now();
-                                let _ = client_hist.record(lat_us);
-                                published_counter.fetch_add(1, Ordering::Relaxed);
-                                pb_clone.inc(1);
-                                completed_count += 1;
-                                if duration_secs == 0 && completed_count == messages {
-                                    let _ = client_clone.disconnect().await;
-                                }
-                            }
-                            Ok(Event::Outgoing(Outgoing::Disconnect)) => {
-                                break;
-                            }
-                            Ok(_) => {}
-                            Err(_) => {
-                                failed_counter.fetch_add(1, Ordering::Relaxed);
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-
-            worker.abort();
-            let _ = worker.await;
-            client_hist
         });
 
         handles.push(handle);
     }
 
-    // Await completion of all client tasks and merge per-client histograms in O(1) memory
     let mut hist =
         Histogram::<u64>::new_with_bounds(1, 60_000_000, 3).expect("Failed to create histogram");
 
@@ -404,7 +728,6 @@ pub async fn run_load_test(args: Args) -> BenchmarkReport {
     signal_handle.abort();
     pb.finish_and_clear();
 
-    // Calculate and print benchmark summary
     let elapsed = start_time.elapsed();
     let actual_sent = published_count.load(Ordering::Relaxed);
     let malformed_sent = malformed_count.load(Ordering::Relaxed);

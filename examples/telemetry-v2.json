@@ -1,0 +1,13 @@
+{
+  "schema_version": "2.0",
+  "device_id": "sensor-{device_id}",
+  "seq": "{seq}",
+  "timestamp_ms": "{timestamp}",
+  "timestamp_us": "{timestamp_us}",
+  "trace_id": "{uuid}",
+  "metrics": {
+    "temperature_c": "{random_float}",
+    "battery_pct": "{random_int}",
+    "alarm_active": "{random_bool}"
+  }
+}

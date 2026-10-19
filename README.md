@@ -1,108 +1,103 @@
 # 🎯 MQTT Sniper
 
-[![Crates.io Version](https://img.shields.io/crates/v/mqtt-sniper?style=flat&logo=rust)](https://crates.io/crates/mqtt-sniper)
-[![Crates.io Downloads](https://img.shields.io/crates/d/mqtt-sniper?style=flat&color=28a745)](https://crates.io/crates/mqtt-sniper)
-[![CI Status](https://github.com/thitipongroo/mqtt-sniper/actions/workflows/ci.yml/badge.svg)](https://github.com/thitipongroo/mqtt-sniper/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+![Rust](https://img.shields.io/badge/rust-%23000000.svg?style=for-the-badge&logo=rust&logoColor=white)
+![Tokio](https://img.shields.io/badge/Tokio-Async-blue?style=for-the-badge)
+![MQTT](https://img.shields.io/badge/MQTT-3.1.1%20%7C%205.0-660066?style=for-the-badge)
+![License](https://img.shields.io/badge/license-MIT-green?style=for-the-badge)
 
-A blazing-fast, memory-efficient MQTT load testing CLI written in Rust. Designed to stress-test enterprise IoT architectures by spawning thousands of concurrent asynchronous clients.
+**MQTT Sniper** is a blazing-fast, memory-efficient MQTT load testing CLI written in Rust. Built on top of the **Tokio** asynchronous runtime and **rumqttc**, it can simulate tens of thousands of concurrent IoT devices (`pub`, `sub`, and `conn` modes) from a single machine with bounded $O(1)$ memory overhead per client.
 
-## 🚀 Why MQTT Sniper?
+---
 
-When building enterprise IoT platforms, testing the ingestion boundary is critical. Traditional load testing tools written in Java or Node.js often become the bottleneck themselves due to memory overhead and garbage collection pauses when managing 10,000+ concurrent TCP connections.
+## ✨ Key Features
 
-MQTT Sniper leverages **Rust** and the **Tokio async runtime** to deliver extreme throughput (msgs/sec) with a near-zero memory footprint. It ensures that your load tester is never the bottleneck.
+* **🚀 Massive Concurrency**: Spawns thousands of lightweight Tokio green-threads instead of heavy OS threads, protected by an optional `--max-connections` semaphore limiter.
+* **📡 MQTT v3.1.1 & v5.0 Protocol Support**: Switch seamlessly between MQTT v3.1.1 (`--mqtt-version 4`) and MQTT v5.0 (`--mqtt-version 5`).
+* **🔄 Publish, Subscribe & Connection Storm Modes**:
+  * `--mode pub`: High-throughput message ingestion benchmarking with QoS 0, 1 (`PUBACK`), and 2 (`PUBCOMP`) acknowledgement tracking.
+  * `--mode sub`: Fan-out subscriber benchmarking with automatic end-to-end latency extraction from `"ts"`, `"timestamp"`, or `"time"` JSON fields (auto-detecting seconds, milliseconds, or microseconds).
+  * `--mode conn`: Connection storm and session persistence (`--clean-session=false`) benchmarking (`CONNECT` -> `CONNACK` handshake latency).
+* **⏱️ Bounded $O(1)$ HDR Histogram Latency**: Per-client `hdrhistogram` instances record microsecond-precision latencies (`min`, `avg`, `p50`, `p95`, `p99`, `max`) with constant memory usage during multi-hour soak tests (`--duration-secs`).
+* **🔒 SSL/TLS & Mutual TLS (mTLS)**: Native support for `mqtts://` via system root certificates (`--tls`), custom CA certificates (`--ca`), and client certificate authentication (`--cert`, `--key`).
+* **🧬 Dynamic Telemetry & Per-Device Auth**:
+  * Supports `{device_id}` interpolation in `--topic`, `--username`, and `--password` alongside configurable `--start-number` (`-n`) and `--client-prefix`.
+  * Supports `{device_id}`, `{seq}`, `{timestamp}`, `{timestamp_secs}`, `{timestamp_us}`, `{random_int}`, `{random_float}`, `{random_bool}`, and `{uuid}` in `--payload` or `--payload-file`.
+* **💥 Chaos / DLQ Fault Injection**: Inject a deterministic percentage of malformed payloads via `--malformed-rate` (`0.0` to `1.0`) to verify Dead-Letter Queue (DLQ) pipelines.
+* **🚦 CI/CD SLO Quality Gates & Graceful Shutdown**: Enforce latency (`--max-p95-ms`) and reliability (`--min-success-rate`) thresholds with automatic non-zero exit codes, JSON export (`--output-json`), and `Ctrl+C` graceful shutdown.
 
-## ⚡ Features
+---
 
-- **High Concurrency**: Spawns thousands of independent MQTT clients in milliseconds using Tokio light-weight tasks, with optional active connection limiting (`--max-connections`).
-- **Publish, Subscribe & Soak Testing**: Benchmark message ingestion (`--mode pub`), fan-out delivery (`--mode sub`), or run time-based soak tests (`--duration-secs`).
-- **Enterprise Security (TLS / mTLS)**: Native support for encrypted `mqtts://` connections (`--tls`), custom CA certificates (`--ca`), and mutual TLS client certificates (`--cert`, `--key`).
-- **Dynamic Telemetry Payloads**: Inject realistic random sensor telemetry (`{random_int}`, `{random_float}`, `{uuid}`, `{device_id}`, `{seq}`, `{timestamp}`).
-- **Latency Histogram**: Tracks per-message delivery & ACK round-trip latencies (`min`, `avg`, `p50`, `p95`, `p99`, `max`) using High Dynamic Range (HDR) histograms.
-- **Live Terminal Progress**: Real-time progress bar with live throughput (`msgs/sec`) and ETA tracking.
-- **CI/CD Ready**: Export structured benchmark reports directly to JSON (`--output-json`).
+## 📦 Installation
 
-## 🛠️ Installation & Usage
-
-Build from source:
-
-```bash
-cargo build --release
-```
-
-Cargo:
+### Option 1: Install via Cargo (Crates.io)
 
 ```bash
 cargo install mqtt-sniper
 ```
 
-Docker (via GitHub Container Registry):
+### Option 2: Run via Docker (Multi-Arch linux/amd64 & linux/arm64)
 
 ```bash
-docker run --rm ghcr.io/thitipongroo/mqtt-sniper:latest --broker host.docker.internal --clients 500
+docker run --rm ghcr.io/thitipongroo/mqtt-sniper:latest --help
 ```
 
-### Quick Start
-
-Run with default settings (`localhost:1883`, 100 clients, 10 messages per client):
+### Option 3: Build from Source
 
 ```bash
-./target/release/mqtt-sniper
+git clone https://github.com/thitipongroo/mqtt-sniper.git
+cd mqtt-sniper
+cargo build --release
+./target/release/mqtt-sniper --help
 ```
 
-Stress-test with custom parameters (e.g., 1,000 clients sending 50 messages each with QoS 1):
+## 💡 Example Scenarios
+
+### 1. MQTT v5.0 High-Throughput Publish with SLO Quality Gates
 
 ```bash
-./target/release/mqtt-sniper \
+mqtt-sniper \
   --broker 127.0.0.1 \
-  --port 1883 \
-  --clients 1000 \
-  --messages 50 \
-  --topic "sensor/telemetry" \
+  --mqtt-version 5 \
+  --clients 500 \
+  --messages 200 \
   --qos 1 \
+  --payload-file examples/telemetry-v2.json \
+  --max-p95-ms 50.0 \
+  --min-success-rate 0.999 \
   --output-json report.json
 ```
 
-Run a 60-second Time-based Soak Test with realistic random telemetry payloads:
+### 2. Multi-Tenant IoT Platform Simulation (Per-Device Auth + DLQ Chaos)
 
 ```bash
-./target/release/mqtt-sniper \
-  --broker 127.0.0.1 \
-  --clients 500 \
-  --duration-secs 60 \
-  --interval-ms 100 \
-  --payload '{"msg_id": "{uuid}", "device_id": {device_id}, "temp": {random_float}, "battery": {random_int}, "ts": {timestamp}}'
-```
-
-Benchmark Fan-out Subscriber delivery (e.g., 500 subscribers each receiving 20 messages):
-
-```bash
-./target/release/mqtt-sniper \
-  --broker 127.0.0.1 \
+mqtt-sniper \
+  --broker localhost \
   --port 1883 \
-  --mode sub \
-  --clients 500 \
-  --messages 20 \
-  --topic "sensor/telemetry" \
-  --qos 1
+  --clients 100 \
+  --start-number 1 \
+  --client-prefix "sensor-" \
+  --username "sensor-{device_id}" \
+  --password "secret-{device_id}" \
+  --topic "tenants/org-1/devices/sensor-{device_id}/telemetry" \
+  --qos 1 \
+  --malformed-rate 0.05 \
+  --duration-secs 60
 ```
 
-Connect to an enterprise broker over SSL/TLS or Mutual TLS (mTLS):
+### 3. Connection Storm & Persistent Session Benchmark (--mode conn)
 
 ```bash
-./target/release/mqtt-sniper \
-  --broker iot.example.com \
-  --port 8883 \
-  --tls \
-  --ca certs/ca.pem \
-  --cert certs/client.crt \
-  --key certs/client.key \
-  --clients 200 \
-  --max-connections 100
+mqtt-sniper \
+  --broker 127.0.0.1 \
+  --mode conn \
+  --mqtt-version 5 \
+  --clients 2000 \
+  --clean-session=false \
+  --duration-secs 30 \
+  --ramp-up-ms 1
 ```
 
-### ⚙️ CLI Options
+## ⚙️ CLI Options
 
 | Flag | Short | Default | Description |
 | :--- | :---: | :---: | :--- |
@@ -131,7 +126,7 @@ Connect to an enterprise broker over SSL/TLS or Mutual TLS (mTLS):
 | `--help` | `-h` | - | Print help information |
 | `--version` | `-V` | - | Print version information |
 
-### 📦 Payload Format
+## 📦 Payload Format
 
 Each client (`sniper-client-{i}`) publishes JSON payloads to the target topic. By default:
 
@@ -141,16 +136,16 @@ Each client (`sniper-client-{i}`) publishes JSON payloads to the target topic. B
 
 The payload template can be customized via `--payload`, and dynamic variables are substituted automatically:
 
-- `{device_id}`: Simulated client index (0, 1, 2, ...)
-- `{seq}`: Message sequence number per client
-- `{timestamp}`: Current Unix timestamp in milliseconds
-- `{random_int}`: Random integer between `0` and `100`
-- `{random_float}`: Random floating-point number between `20.00` and `40.00`
-- `{uuid}`: Random RFC 4122 UUID v4 string
+* `{device_id}`: Simulated client index (0, 1, 2, ...)
+* `{seq}`: Message sequence number per client
+* `{timestamp}`: Current Unix timestamp in milliseconds
+* `{random_int}`: Random integer between `0` and `100`
+* `{random_float}`: Random floating-point number between `20.00` and `40.00`
+* `{uuid}`: Random RFC 4122 UUID v4 string
 
 Use `--payload-size` to enforce a minimum payload byte size (useful for benchmarking network bandwidth under large packet loads).
 
-### 📊 Example Output
+## 📊 Example Output
 
 ```text
 🚀 Starting MQTT Sniper...
@@ -164,4 +159,8 @@ Spawning 1000 concurrent Pub clients (50 msgs/client, QoS 0)...
 
 ## 🔗 Related Projects in the Ecosystem
 
-- **[mqtt-mock-sensor](https://github.com/thitipongroo/mqtt-mock-sensor)**: Need realistic IoT sensor telemetry (GPS, Env, Power), anomaly injection, or bi-directional Device Shadow testing? Check out our zero-config Node.js simulator (`npx mqtt-mock-sensor`).
+* **[mqtt-mock-sensor](https://github.com/thitipongroo/mqtt-mock-sensor)**: Need realistic IoT sensor telemetry (GPS, Env, Power), anomaly injection, or bi-directional Device Shadow testing? Check out our zero-config Node.js simulator (`npx mqtt-mock-sensor`).
+
+## 🤝 Contributing & Security
+
+* Please see `CONTRIBUTING.md` for development guidelines and `SECURITY.md` for our vulnerability reporting policy.

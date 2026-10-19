@@ -9,6 +9,7 @@ pub struct BenchmarkReport {
     pub broker: String,
     pub port: u16,
     pub mode: Mode,
+    pub mqtt_version: u8,
     pub tls: bool,
     pub clients: usize,
     pub messages_per_client: usize,
@@ -94,6 +95,7 @@ impl BenchmarkReport {
             broker: args.broker.clone(),
             port: args.port,
             mode: args.mode,
+            mqtt_version: args.mqtt_version,
             tls: use_tls,
             clients: args.clients,
             messages_per_client: args.messages,
@@ -124,7 +126,15 @@ impl BenchmarkReport {
             Mode::Sub => "messages received",
             Mode::Conn => "clients connected",
         };
-        println!("✅ Load test completed in {:.2?}", elapsed);
+        let proto_label = if self.mqtt_version == 5 {
+            "v5.0"
+        } else {
+            "v3.1.1"
+        };
+        println!(
+            "✅ Load test completed in {:.2?} (MQTT {})",
+            elapsed, proto_label
+        );
         if self.duration_secs > 0 && self.mode != Mode::Conn {
             println!(
                 "📊 Total {}: {} (Duration target: {}s, Malformed injected: {}, Failed clients: {}, Success rate: {:.2}%)",
@@ -199,6 +209,8 @@ mod tests {
             "10",
             "-m",
             "10",
+            "--mqtt-version",
+            "5",
             "--max-p95-ms",
             "50.0",
             "--min-success-rate",
@@ -209,6 +221,7 @@ mod tests {
 
         let pass_report = BenchmarkReport::new(&args, Duration::from_secs(1), 100, 0, 0, &hist);
         assert!(pass_report.slo_passed);
+        assert_eq!(pass_report.mqtt_version, 5);
         assert!((pass_report.success_rate - 1.0).abs() < f64::EPSILON);
 
         // Breach success rate (95/100 < 0.99)

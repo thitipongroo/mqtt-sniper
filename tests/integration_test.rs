@@ -5,6 +5,14 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 async fn start_mock_broker(expected_qos: u8, expected_clients: usize) -> u16 {
+    start_mock_broker_with_version(expected_qos, expected_clients, 4).await
+}
+
+async fn start_mock_broker_with_version(
+    expected_qos: u8,
+    expected_clients: usize,
+    mqtt_version: u8,
+) -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
 
@@ -16,8 +24,12 @@ async fn start_mock_broker(expected_qos: u8, expected_clients: usize) -> u16 {
                     let mut buf = [0u8; 1024];
                     // Read CONNECT
                     let _ = socket.read(&mut buf).await;
-                    // Send CONNACK
-                    let _ = socket.write_all(&[0x20, 0x02, 0x00, 0x00]).await;
+                    // Send CONNACK (v5 includes 1-byte properties length = 0x00)
+                    if mqtt_version == 5 {
+                        let _ = socket.write_all(&[0x20, 0x03, 0x00, 0x00, 0x00]).await;
+                    } else {
+                        let _ = socket.write_all(&[0x20, 0x02, 0x00, 0x00]).await;
+                    }
 
                     loop {
                         let mut header = [0u8; 2];
@@ -85,6 +97,7 @@ fn default_test_args(port: u16, clients: usize, messages: usize, qos: u8, topic:
         broker: "127.0.0.1".to_string(),
         port,
         mode: Mode::Pub,
+        mqtt_version: 4,
         clients,
         start_number: 0,
         client_prefix: "sniper-client-".to_string(),
@@ -253,4 +266,19 @@ async fn test_conn_mode_and_slo_gate() {
     assert_eq!(report.failed_clients, 0);
     assert!(!report.clean_session);
     assert!(report.slo_passed);
+}
+
+#[tokio::test]
+async fn test_mqtt_v5_publish_qos1() {
+    let clients = 2;
+    let messages = 2;
+    let port = start_mock_broker_with_version(1, clients, 5).await;
+
+    let mut args = default_test_args(port, clients, messages, 1, "test/v5/qos1");
+    args.mqtt_version = 5;
+
+    let report = run_load_test(args).await;
+    assert_eq!(report.mqtt_version, 5);
+    assert_eq!(report.actual_sent, 4);
+    assert_eq!(report.failed_clients, 0);
 }

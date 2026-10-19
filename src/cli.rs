@@ -32,6 +32,10 @@ pub struct Args {
     #[arg(long, value_enum, default_value_t = Mode::Pub)]
     pub mode: Mode,
 
+    /// MQTT protocol version (3 or 4 = MQTT v3.1.1, 5 = MQTT v5.0)
+    #[arg(long, default_value_t = 4, value_parser = clap::value_parser!(u8).range(3..=5))]
+    pub mqtt_version: u8,
+
     /// Number of concurrent simulated IoT clients
     #[arg(short, long, default_value_t = 100)]
     pub clients: usize,
@@ -127,24 +131,28 @@ pub struct Args {
     #[arg(long)]
     pub key: Option<String>,
 
-    /// Maximum allowed p95 latency in milliseconds for CI/CD SLO gate
+    /// SLO Gate: Maximum allowed p95 latency in milliseconds (exits with code 1 if exceeded)
     #[arg(long)]
     pub max_p95_ms: Option<f64>,
 
-    /// Minimum required success rate (0.0 to 1.0, e.g. 0.995) for CI/CD SLO gate
+    /// SLO Gate: Minimum required delivery/connection success rate between 0.0 and 1.0 (exits with code 1 if below)
     #[arg(long)]
     pub min_success_rate: Option<f64>,
 
-    /// Export benchmark results to a JSON file
+    /// Path to export benchmark report as a JSON file
     #[arg(long)]
     pub output_json: Option<String>,
 }
 
 pub fn parse_qos(qos: u8) -> QoS {
     match qos {
+        0 => QoS::AtMostOnce,
         1 => QoS::AtLeastOnce,
         2 => QoS::ExactlyOnce,
-        _ => QoS::AtMostOnce,
+        _ => {
+            eprintln!("⚠️ Invalid QoS level '{}'. Defaulting to QoS 0.", qos);
+            QoS::AtMostOnce
+        }
     }
 }
 
@@ -234,6 +242,7 @@ mod tests {
         assert_eq!(args.broker, "localhost");
         assert_eq!(args.port, 1883);
         assert_eq!(args.mode, Mode::Pub);
+        assert_eq!(args.mqtt_version, 4);
         assert_eq!(args.clients, 100);
         assert_eq!(args.start_number, 0);
         assert_eq!(args.client_prefix, "sniper-client-");
@@ -275,6 +284,8 @@ mod tests {
             "8883",
             "--mode",
             "conn",
+            "--mqtt-version",
+            "5",
             "-c",
             "50",
             "-n",
@@ -329,6 +340,7 @@ mod tests {
         assert_eq!(args.broker, "10.0.0.1");
         assert_eq!(args.port, 8883);
         assert_eq!(args.mode, Mode::Conn);
+        assert_eq!(args.mqtt_version, 5);
         assert_eq!(args.clients, 50);
         assert_eq!(args.start_number, 1);
         assert_eq!(args.client_prefix, "sensor-");
