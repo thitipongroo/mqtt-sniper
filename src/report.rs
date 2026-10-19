@@ -15,10 +15,13 @@ pub struct BenchmarkReport {
     pub duration_secs: u64,
     pub qos: u8,
     pub retain: bool,
+    pub clean_session: bool,
     pub target_messages: usize,
     pub actual_sent: usize,
     pub malformed_sent: usize,
     pub failed_clients: usize,
+    pub success_rate: f64,
+    pub slo_passed: bool,
     pub elapsed_secs: f64,
     pub throughput_msgs_per_sec: f64,
     pub latency_min_ms: f64,
@@ -38,7 +41,9 @@ impl BenchmarkReport {
         failed_clients: usize,
         hist: &Histogram<u64>,
     ) -> Self {
-        let target_messages = if args.duration_secs > 0 {
+        let target_messages = if args.mode == Mode::Conn {
+            args.clients
+        } else if args.duration_secs > 0 {
             actual_sent
         } else {
             args.clients * args.messages
@@ -49,6 +54,20 @@ impl BenchmarkReport {
         } else {
             0.0
         };
+
+        let mut success_rate = if target_messages > 0 {
+            (actual_sent as f64 / target_messages as f64).clamp(0.0, 1.0)
+        } else if failed_clients == 0 {
+            1.0
+        } else {
+            0.0
+        };
+
+        if failed_clients > 0 && args.clients > 0 {
+            let client_ok_rate =
+                args.clients.saturating_sub(failed_clients) as f64 / args.clients as f64;
+            success_rate = success_rate.min(client_ok_rate);
+        }
 
         let (min_ms, avg_ms, p50_ms, p95_ms, p99_ms, max_ms) = if !hist.is_empty() {
             (
@@ -63,6 +82,12 @@ impl BenchmarkReport {
             (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
         };
 
+        let p95_ok = args.max_p95_ms.is_none_or(|max_p95| p95_ms <= max_p95);
+        let rate_ok = args
+            .min_success_rate
+            .is_none_or(|min_rate| success_rate >= min_rate);
+        let slo_passed = p95_ok && rate_ok;
+
         let use_tls = args.tls || args.ca.is_some() || args.cert.is_some() || args.key.is_some();
 
         Self {
@@ -75,10 +100,13 @@ impl BenchmarkReport {
             duration_secs: args.duration_secs,
             qos: args.qos,
             retain: args.retain,
+            clean_session: args.clean_session,
             target_messages,
             actual_sent,
             malformed_sent,
             failed_clients,
+            success_rate,
+            slo_passed,
             elapsed_secs,
             throughput_msgs_per_sec: throughput,
             latency_min_ms: min_ms,
@@ -92,33 +120,41 @@ impl BenchmarkReport {
 
     pub fn print_summary(&self, elapsed: Duration) {
         let action_label = match self.mode {
-            Mode::Pub => "sent",
-            Mode::Sub => "received",
+            Mode::Pub => "messages sent",
+            Mode::Sub => "messages received",
+            Mode::Conn => "clients connected",
         };
         println!("✅ Load test completed in {:.2?}", elapsed);
-        if self.duration_secs > 0 {
+        if self.duration_secs > 0 && self.mode != Mode::Conn {
             println!(
-                "📊 Total messages {}: {} (Duration target: {}s, Malformed injected: {}, Failed clients: {})",
+                "📊 Total {}: {} (Duration target: {}s, Malformed injected: {}, Failed clients: {}, Success rate: {:.2}%)",
                 action_label,
                 self.actual_sent,
                 self.duration_secs,
                 self.malformed_sent,
-                self.failed_clients
+                self.failed_clients,
+                self.success_rate * 100.0
             );
         } else {
             println!(
-                "📊 Total messages {}: {} / {} (Malformed injected: {}, Failed clients: {})",
+                "📊 Total {}: {} / {} (Malformed injected: {}, Failed clients: {}, Success rate: {:.2}%)",
                 action_label,
                 self.actual_sent,
                 self.target_messages,
                 self.malformed_sent,
-                self.failed_clients
+                self.failed_clients,
+                self.success_rate * 100.0
             );
         }
         if self.elapsed_secs > 0.0 {
+            let unit = if self.mode == Mode::Conn {
+                "conns/sec"
+            } else {
+                "msgs/sec"
+            };
             println!(
-                "⚡ Throughput: {:.2} msgs/sec",
-                self.throughput_msgs_per_sec
+                "⚡ Throughput: {:.2} {}",
+                self.throughput_msgs_per_sec, unit
             );
         }
         println!(
@@ -130,6 +166,13 @@ impl BenchmarkReport {
             self.latency_p99_ms,
             self.latency_max_ms
         );
+        if !self.slo_passed {
+            eprintln!(
+                "❌ SLO Gate FAILED: p95={:.2}ms, success_rate={:.2}%",
+                self.latency_p95_ms,
+                self.success_rate * 100.0
+            );
+        }
     }
 
     pub fn save_json(&self, path: &str) {
@@ -140,5 +183,41 @@ impl BenchmarkReport {
                 println!("💾 Saved JSON benchmark report to {}", path);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn test_slo_gate_evaluation() {
+        let mut args = Args::parse_from([
+            "mqtt-sniper",
+            "-c",
+            "10",
+            "-m",
+            "10",
+            "--max-p95-ms",
+            "50.0",
+            "--min-success-rate",
+            "0.99",
+        ]);
+        let mut hist = Histogram::<u64>::new_with_bounds(1, 60_000_000, 3).unwrap();
+        let _ = hist.record(10_000); // 10 ms
+
+        let pass_report = BenchmarkReport::new(&args, Duration::from_secs(1), 100, 0, 0, &hist);
+        assert!(pass_report.slo_passed);
+        assert!((pass_report.success_rate - 1.0).abs() < f64::EPSILON);
+
+        // Breach success rate (95/100 < 0.99)
+        let fail_rate_report = BenchmarkReport::new(&args, Duration::from_secs(1), 95, 0, 1, &hist);
+        assert!(!fail_rate_report.slo_passed);
+
+        // Breach p95 latency (max_p95_ms = 5.0 < 10.0 ms)
+        args.max_p95_ms = Some(5.0);
+        let fail_lat_report = BenchmarkReport::new(&args, Duration::from_secs(1), 100, 0, 0, &hist);
+        assert!(!fail_lat_report.slo_passed);
     }
 }

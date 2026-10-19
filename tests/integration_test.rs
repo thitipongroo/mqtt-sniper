@@ -94,6 +94,7 @@ fn default_test_args(port: u16, clients: usize, messages: usize, qos: u8, topic:
         topic: topic.to_string(),
         qos,
         retain: false,
+        clean_session: true,
         keep_alive: 5,
         ramp_up_ms: 0,
         interval_ms: 0,
@@ -107,6 +108,8 @@ fn default_test_args(port: u16, clients: usize, messages: usize, qos: u8, topic:
         ca: None,
         cert: None,
         key: None,
+        max_p95_ms: None,
+        min_success_rate: None,
         output_json: None,
     }
 }
@@ -231,4 +234,23 @@ async fn test_start_number_dynamic_credentials_and_chaos() {
     assert_eq!(report.actual_sent, 4);
     assert_eq!(report.malformed_sent, 4);
     assert_eq!(report.failed_clients, 0);
+}
+
+#[tokio::test]
+async fn test_conn_mode_and_slo_gate() {
+    let clients = 3;
+    let port = start_mock_broker(0, clients).await;
+
+    let mut args = default_test_args(port, clients, 0, 0, "test/conn");
+    args.mode = Mode::Conn;
+    args.clean_session = false;
+    args.max_p95_ms = Some(500.0);
+    args.min_success_rate = Some(0.99);
+
+    let report = run_load_test(args).await;
+    assert_eq!(report.mode, Mode::Conn);
+    assert_eq!(report.actual_sent, 3);
+    assert_eq!(report.failed_clients, 0);
+    assert!(!report.clean_session);
+    assert!(report.slo_passed);
 }

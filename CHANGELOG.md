@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-10-19
+
+### Added
+
+- **Bounded $O(1)$ Memory Per-Client HDR Histograms**: Replaced unbounded per-client `Vec<u64>` latency buffers with per-client `Histogram<u64>` instances merged on completion, ensuring constant memory usage during multi-hour soak tests.
+- **Graceful Shutdown (`Ctrl+C` / `SIGINT`)**: Added signal handling via `tokio::signal::ctrl_c()` to cleanly disconnect active MQTT clients and output full latency statistics and JSON reports when interrupted.
+- **Connection Storm Mode (`--mode conn`) & Persistent Sessions (`--clean-session`)**: Added `conn` benchmark mode to measure `CONNECT` -> `CONNACK` handshake latency and hold concurrent connections open.
+- **CI/CD Automated SLO Quality Gates (`--max-p95-ms`, `--min-success-rate`)**: Added automatic SLO evaluation (`slo_passed`, `success_rate`) that exits with code `1` when latency or delivery rate thresholds are breached.
+
 ## [0.5.0] - 2026-10-18
 
 ### Added

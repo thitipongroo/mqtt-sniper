@@ -12,6 +12,8 @@ pub enum Mode {
     Pub,
     /// Subscribe to topics and receive messages from the broker
     Sub,
+    /// Establish connections and benchmark CONNECT -> CONNACK handshake latency
+    Conn,
 }
 
 /// CLI argument parsing structure
@@ -26,7 +28,7 @@ pub struct Args {
     #[arg(short, long, default_value_t = 1883)]
     pub port: u16,
 
-    /// Benchmark mode: 'pub' (publish) or 'sub' (subscribe)
+    /// Benchmark mode: 'pub' (publish), 'sub' (subscribe), or 'conn' (connection storm)
     #[arg(long, value_enum, default_value_t = Mode::Pub)]
     pub mode: Mode,
 
@@ -65,6 +67,10 @@ pub struct Args {
     /// Publish messages with the MQTT retain flag set
     #[arg(long, default_value_t = false)]
     pub retain: bool,
+
+    /// MQTT clean session flag (set false for persistent sessions)
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    pub clean_session: bool,
 
     /// MQTT keep-alive interval in seconds
     #[arg(long, default_value_t = 5)]
@@ -121,6 +127,14 @@ pub struct Args {
     #[arg(long)]
     pub key: Option<String>,
 
+    /// Maximum allowed p95 latency in milliseconds for CI/CD SLO gate
+    #[arg(long)]
+    pub max_p95_ms: Option<f64>,
+
+    /// Minimum required success rate (0.0 to 1.0, e.g. 0.995) for CI/CD SLO gate
+    #[arg(long)]
+    pub min_success_rate: Option<f64>,
+
     /// Export benchmark results to a JSON file
     #[arg(long)]
     pub output_json: Option<String>,
@@ -139,6 +153,24 @@ pub fn resolve_payload_template(args: &Args) -> Result<String, String> {
         return Err(format!(
             "--malformed-rate must be between 0.0 and 1.0 (got {})",
             args.malformed_rate
+        ));
+    }
+
+    if let Some(rate) = args.min_success_rate
+        && !(0.0..=1.0).contains(&rate)
+    {
+        return Err(format!(
+            "--min-success-rate must be between 0.0 and 1.0 (got {})",
+            rate
+        ));
+    }
+
+    if let Some(max_p95) = args.max_p95_ms
+        && max_p95 < 0.0
+    {
+        return Err(format!(
+            "--max-p95-ms must be non-negative (got {})",
+            max_p95
         ));
     }
 
@@ -211,6 +243,7 @@ mod tests {
         assert_eq!(args.topic, "sensor/sniper");
         assert_eq!(args.qos, 0);
         assert!(!args.retain);
+        assert!(args.clean_session);
         assert_eq!(args.keep_alive, 5);
         assert_eq!(args.ramp_up_ms, 0);
         assert_eq!(args.interval_ms, 0);
@@ -227,6 +260,8 @@ mod tests {
         assert_eq!(args.ca, None);
         assert_eq!(args.cert, None);
         assert_eq!(args.key, None);
+        assert_eq!(args.max_p95_ms, None);
+        assert_eq!(args.min_success_rate, None);
         assert_eq!(args.output_json, None);
     }
 
@@ -239,7 +274,7 @@ mod tests {
             "-p",
             "8883",
             "--mode",
-            "sub",
+            "conn",
             "-c",
             "50",
             "-n",
@@ -257,6 +292,8 @@ mod tests {
             "-q",
             "2",
             "--retain",
+            "--clean-session",
+            "false",
             "--keep-alive",
             "30",
             "--ramp-up-ms",
@@ -282,12 +319,16 @@ mod tests {
             "client.crt",
             "--key",
             "client.key",
+            "--max-p95-ms",
+            "100.0",
+            "--min-success-rate",
+            "0.995",
             "--output-json",
             "report.json",
         ]);
         assert_eq!(args.broker, "10.0.0.1");
         assert_eq!(args.port, 8883);
-        assert_eq!(args.mode, Mode::Sub);
+        assert_eq!(args.mode, Mode::Conn);
         assert_eq!(args.clients, 50);
         assert_eq!(args.start_number, 1);
         assert_eq!(args.client_prefix, "sensor-");
@@ -297,6 +338,7 @@ mod tests {
         assert_eq!(args.topic, "test/topic/{device_id}");
         assert_eq!(args.qos, 2);
         assert!(args.retain);
+        assert!(!args.clean_session);
         assert_eq!(args.keep_alive, 30);
         assert_eq!(args.ramp_up_ms, 5);
         assert_eq!(args.interval_ms, 10);
@@ -310,6 +352,8 @@ mod tests {
         assert_eq!(args.ca, Some("ca.pem".to_string()));
         assert_eq!(args.cert, Some("client.crt".to_string()));
         assert_eq!(args.key, Some("client.key".to_string()));
+        assert_eq!(args.max_p95_ms, Some(100.0));
+        assert_eq!(args.min_success_rate, Some(0.995));
         assert_eq!(args.output_json, Some("report.json".to_string()));
     }
 
@@ -322,6 +366,14 @@ mod tests {
         assert!(resolve_payload_template(&args).is_err());
 
         args.malformed_rate = 0.05;
+        args.min_success_rate = Some(1.2);
+        assert!(resolve_payload_template(&args).is_err());
+
+        args.min_success_rate = Some(0.995);
+        args.max_p95_ms = Some(-5.0);
+        assert!(resolve_payload_template(&args).is_err());
+
+        args.max_p95_ms = Some(100.0);
         let tmp_file = std::env::temp_dir().join("mqtt_sniper_test_payload.json");
         fs::write(&tmp_file, "  {\"deviceId\": \"sensor-{device_id}\"} \n").unwrap();
         args.payload_file = Some(tmp_file.to_str().unwrap().to_string());

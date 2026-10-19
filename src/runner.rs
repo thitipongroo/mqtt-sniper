@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tokio::sync::{Semaphore, mpsc};
+use tokio::sync::{Semaphore, mpsc, watch};
 use tokio::task;
 
 fn extract_payload_latency_us(payload: &[u8], fallback_start: Instant) -> u64 {
@@ -41,7 +41,11 @@ fn extract_payload_latency_us(payload: &[u8], fallback_start: Instant) -> u64 {
 
 pub async fn run_load_test(args: Args) -> BenchmarkReport {
     let qos = parse_qos(args.qos);
-    let target_messages = args.clients * args.messages;
+    let target_messages = if args.mode == Mode::Conn {
+        args.clients
+    } else {
+        args.clients * args.messages
+    };
     let resolved_payload = resolve_payload_template(&args).unwrap_or_else(|err| {
         eprintln!("❌ Payload Configuration Error: {}", err);
         std::process::exit(1);
@@ -58,7 +62,12 @@ pub async fn run_load_test(args: Args) -> BenchmarkReport {
 
     println!("🚀 Starting MQTT Sniper...");
     println!("Broker: {}://{}:{}", scheme, args.broker, args.port);
-    if args.duration_secs > 0 {
+    if args.mode == Mode::Conn {
+        println!(
+            "Spawning {} concurrent Conn clients (hold {}s, clean_session={})...",
+            args.clients, args.duration_secs, args.clean_session
+        );
+    } else if args.duration_secs > 0 {
         println!(
             "Spawning {} concurrent {:?} clients (duration {}s, QoS {})...",
             args.clients, args.mode, args.duration_secs, args.qos
@@ -70,7 +79,7 @@ pub async fn run_load_test(args: Args) -> BenchmarkReport {
         );
     }
 
-    let pb = if args.duration_secs > 0 {
+    let pb = if args.duration_secs > 0 && args.mode != Mode::Conn {
         let spinner = ProgressBar::new_spinner();
         if let Ok(style) = ProgressStyle::with_template(
             "{spinner:.green} [{elapsed_precise}] {pos} msgs | {per_sec}",
@@ -88,6 +97,17 @@ pub async fn run_load_test(args: Args) -> BenchmarkReport {
         bar
     };
 
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let signal_tx = shutdown_tx.clone();
+    let signal_handle = tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            eprintln!(
+                "\n🛑 Received Ctrl+C — initiating graceful shutdown and generating report..."
+            );
+            let _ = signal_tx.send(true);
+        }
+    });
+
     let start_time = Instant::now();
     let mut handles = Vec::with_capacity(args.clients);
     let published_count = Arc::new(AtomicUsize::new(0));
@@ -101,9 +121,17 @@ pub async fn run_load_test(args: Args) -> BenchmarkReport {
 
     // Spawn concurrent client tasks
     for i in 0..args.clients {
+        if *shutdown_tx.borrow() {
+            break;
+        }
+
         // Apply ramp-up delay before spawning the next client if configured
         if args.ramp_up_ms > 0 && i > 0 {
-            tokio::time::sleep(Duration::from_millis(args.ramp_up_ms)).await;
+            let mut ramp_rx = shutdown_rx.clone();
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_millis(args.ramp_up_ms)) => {}
+                _ = ramp_rx.changed() => break,
+            }
         }
 
         let device_id = args.start_number + i;
@@ -119,6 +147,7 @@ pub async fn run_load_test(args: Args) -> BenchmarkReport {
         let messages = args.messages;
         let duration_secs = args.duration_secs;
         let retain = args.retain;
+        let clean_session = args.clean_session;
         let keep_alive = args.keep_alive;
         let interval_ms = args.interval_ms;
         let username = args
@@ -135,6 +164,8 @@ pub async fn run_load_test(args: Args) -> BenchmarkReport {
         let failed_counter = Arc::clone(&failed_clients);
         let pb_clone = pb.clone();
         let sem_clone = semaphore.clone();
+        let mut worker_shutdown = shutdown_rx.clone();
+        let mut loop_shutdown = shutdown_rx.clone();
 
         // Spawn independent task for each simulated client
         let handle = task::spawn(async move {
@@ -145,24 +176,26 @@ pub async fn run_load_test(args: Args) -> BenchmarkReport {
 
             let mut mqttoptions = MqttOptions::new(client_id, broker, port);
             mqttoptions.set_keep_alive(Duration::from_secs(keep_alive.max(1)));
+            mqttoptions.set_clean_session(clean_session);
             mqttoptions.set_transport(client_transport);
 
             if let Some(ref user) = username {
                 mqttoptions.set_credentials(user, password.as_deref().unwrap_or(""));
             }
 
+            let connect_start = Instant::now();
             let (client, mut eventloop) = AsyncClient::new(mqttoptions, 50);
             let client_clone = client.clone();
             let (tx_time, mut rx_time) = mpsc::unbounded_channel::<Instant>();
 
-            // Worker task for Publish or Subscribe action
+            // Worker task for Publish, Subscribe, or Connection hold action
             let worker = tokio::spawn(async move {
                 match mode {
                     Mode::Pub => {
                         if duration_secs > 0 {
                             let deadline = Instant::now() + Duration::from_secs(duration_secs);
                             let mut j = 0usize;
-                            while Instant::now() < deadline {
+                            while Instant::now() < deadline && !*worker_shutdown.borrow() {
                                 let (payload_bytes, is_malformed) = build_payload_with_chaos(
                                     &payload_template,
                                     device_id,
@@ -188,10 +221,10 @@ pub async fn run_load_test(args: Args) -> BenchmarkReport {
                                     if remaining.is_zero() {
                                         break;
                                     }
-                                    tokio::time::sleep(
-                                        Duration::from_millis(interval_ms).min(remaining),
-                                    )
-                                    .await;
+                                    tokio::select! {
+                                        _ = tokio::time::sleep(Duration::from_millis(interval_ms).min(remaining)) => {}
+                                        _ = worker_shutdown.changed() => break,
+                                    }
                                 } else {
                                     tokio::task::yield_now().await;
                                 }
@@ -199,6 +232,9 @@ pub async fn run_load_test(args: Args) -> BenchmarkReport {
                             let _ = client.disconnect().await;
                         } else {
                             for j in 0..messages {
+                                if *worker_shutdown.borrow() {
+                                    break;
+                                }
                                 let (payload_bytes, is_malformed) = build_payload_with_chaos(
                                     &payload_template,
                                     device_id,
@@ -218,11 +254,15 @@ pub async fn run_load_test(args: Args) -> BenchmarkReport {
                                     break;
                                 }
                                 if interval_ms > 0 && j + 1 < messages {
-                                    tokio::time::sleep(Duration::from_millis(interval_ms)).await;
+                                    tokio::select! {
+                                        _ = tokio::time::sleep(Duration::from_millis(interval_ms)) => {}
+                                        _ = worker_shutdown.changed() => break,
+                                    }
                                 }
                             }
-                            // For QoS 0 (or when 0 messages), disconnect immediately once all messages are queued
-                            if qos == QoS::AtMostOnce || messages == 0 {
+                            // For QoS 0 (or when 0 messages or interrupted), disconnect once queued
+                            if qos == QoS::AtMostOnce || messages == 0 || *worker_shutdown.borrow()
+                            {
                                 let _ = client.disconnect().await;
                             }
                         }
@@ -230,7 +270,10 @@ pub async fn run_load_test(args: Args) -> BenchmarkReport {
                     Mode::Sub => {
                         if duration_secs > 0 {
                             let _ = client.subscribe(topic.as_str(), qos).await;
-                            tokio::time::sleep(Duration::from_secs(duration_secs)).await;
+                            tokio::select! {
+                                _ = tokio::time::sleep(Duration::from_secs(duration_secs)) => {}
+                                _ = worker_shutdown.changed() => {}
+                            }
                             let _ = client.disconnect().await;
                         } else if messages == 0 {
                             let _ = client.disconnect().await;
@@ -238,96 +281,127 @@ pub async fn run_load_test(args: Args) -> BenchmarkReport {
                             let _ = client.subscribe(topic.as_str(), qos).await;
                         }
                     }
+                    Mode::Conn => {
+                        if duration_secs > 0 {
+                            tokio::select! {
+                                _ = tokio::time::sleep(Duration::from_secs(duration_secs)) => {}
+                                _ = worker_shutdown.changed() => {}
+                            }
+                            let _ = client.disconnect().await;
+                        }
+                    }
                 }
             });
 
-            // Poll eventloop to drive network I/O
+            // Poll eventloop to drive network I/O using bounded O(1) per-client HDR Histogram
             let mut completed_count = 0usize;
             let mut inflight: HashMap<u16, Instant> = HashMap::new();
-            let mut latencies_us: Vec<u64> = Vec::with_capacity(messages);
+            let mut client_hist = Histogram::<u64>::new_with_bounds(1, 60_000_000, 3)
+                .expect("Failed to create client histogram");
             let mut last_recv = Instant::now();
 
             loop {
-                match eventloop.poll().await {
-                    Ok(Event::Outgoing(Outgoing::Publish(pkid))) if mode == Mode::Pub => {
-                        if qos == QoS::AtMostOnce {
-                            if let Ok(t0) = rx_time.try_recv() {
-                                latencies_us.push(t0.elapsed().as_micros() as u64);
-                            }
-                            published_counter.fetch_add(1, Ordering::Relaxed);
-                            pb_clone.inc(1);
-                        } else if let Ok(t0) = rx_time.try_recv() {
-                            inflight.insert(pkid, t0);
-                        }
-                    }
-                    Ok(Event::Incoming(Packet::PubAck(ack))) if mode == Mode::Pub => {
-                        if qos == QoS::AtLeastOnce {
-                            if let Some(t0) = inflight.remove(&ack.pkid) {
-                                latencies_us.push(t0.elapsed().as_micros() as u64);
-                            }
-                            published_counter.fetch_add(1, Ordering::Relaxed);
-                            pb_clone.inc(1);
-                            completed_count += 1;
-                            if duration_secs == 0 && completed_count == messages {
-                                let _ = client_clone.disconnect().await;
-                            }
-                        }
-                    }
-                    Ok(Event::Incoming(Packet::PubComp(comp))) if mode == Mode::Pub => {
-                        if qos == QoS::ExactlyOnce {
-                            if let Some(t0) = inflight.remove(&comp.pkid) {
-                                latencies_us.push(t0.elapsed().as_micros() as u64);
-                            }
-                            published_counter.fetch_add(1, Ordering::Relaxed);
-                            pb_clone.inc(1);
-                            completed_count += 1;
-                            if duration_secs == 0 && completed_count == messages {
-                                let _ = client_clone.disconnect().await;
-                            }
-                        }
-                    }
-                    Ok(Event::Incoming(Packet::Publish(publish))) if mode == Mode::Sub => {
-                        let lat_us = extract_payload_latency_us(&publish.payload, last_recv);
-                        last_recv = Instant::now();
-                        latencies_us.push(lat_us);
-                        published_counter.fetch_add(1, Ordering::Relaxed);
-                        pb_clone.inc(1);
-                        completed_count += 1;
-                        if duration_secs == 0 && completed_count == messages {
-                            let _ = client_clone.disconnect().await;
-                        }
-                    }
-                    Ok(Event::Outgoing(Outgoing::Disconnect)) => {
+                tokio::select! {
+                    biased;
+                    _ = loop_shutdown.changed() => {
+                        let _ = client_clone.disconnect().await;
                         break;
                     }
-                    Ok(_) => {}
-                    Err(_) => {
-                        failed_counter.fetch_add(1, Ordering::Relaxed);
-                        break;
+                    poll_res = eventloop.poll() => {
+                        match poll_res {
+                            Ok(Event::Incoming(Packet::ConnAck(_))) if mode == Mode::Conn => {
+                                let lat_us = (connect_start.elapsed().as_micros() as u64).clamp(1, 60_000_000);
+                                let _ = client_hist.record(lat_us);
+                                published_counter.fetch_add(1, Ordering::Relaxed);
+                                pb_clone.inc(1);
+                                if duration_secs == 0 {
+                                    let _ = client_clone.disconnect().await;
+                                }
+                            }
+                            Ok(Event::Outgoing(Outgoing::Publish(pkid))) if mode == Mode::Pub => {
+                                if qos == QoS::AtMostOnce {
+                                    if let Ok(t0) = rx_time.try_recv() {
+                                        let lat_us = (t0.elapsed().as_micros() as u64).clamp(1, 60_000_000);
+                                        let _ = client_hist.record(lat_us);
+                                    }
+                                    published_counter.fetch_add(1, Ordering::Relaxed);
+                                    pb_clone.inc(1);
+                                } else if let Ok(t0) = rx_time.try_recv() {
+                                    inflight.insert(pkid, t0);
+                                }
+                            }
+                            Ok(Event::Incoming(Packet::PubAck(ack))) if mode == Mode::Pub => {
+                                if qos == QoS::AtLeastOnce {
+                                    if let Some(t0) = inflight.remove(&ack.pkid) {
+                                        let lat_us = (t0.elapsed().as_micros() as u64).clamp(1, 60_000_000);
+                                        let _ = client_hist.record(lat_us);
+                                    }
+                                    published_counter.fetch_add(1, Ordering::Relaxed);
+                                    pb_clone.inc(1);
+                                    completed_count += 1;
+                                    if duration_secs == 0 && completed_count == messages {
+                                        let _ = client_clone.disconnect().await;
+                                    }
+                                }
+                            }
+                            Ok(Event::Incoming(Packet::PubComp(comp))) if mode == Mode::Pub => {
+                                if qos == QoS::ExactlyOnce {
+                                    if let Some(t0) = inflight.remove(&comp.pkid) {
+                                        let lat_us = (t0.elapsed().as_micros() as u64).clamp(1, 60_000_000);
+                                        let _ = client_hist.record(lat_us);
+                                    }
+                                    published_counter.fetch_add(1, Ordering::Relaxed);
+                                    pb_clone.inc(1);
+                                    completed_count += 1;
+                                    if duration_secs == 0 && completed_count == messages {
+                                        let _ = client_clone.disconnect().await;
+                                    }
+                                }
+                            }
+                            Ok(Event::Incoming(Packet::Publish(publish))) if mode == Mode::Sub => {
+                                let lat_us = extract_payload_latency_us(&publish.payload, last_recv)
+                                    .clamp(1, 60_000_000);
+                                last_recv = Instant::now();
+                                let _ = client_hist.record(lat_us);
+                                published_counter.fetch_add(1, Ordering::Relaxed);
+                                pb_clone.inc(1);
+                                completed_count += 1;
+                                if duration_secs == 0 && completed_count == messages {
+                                    let _ = client_clone.disconnect().await;
+                                }
+                            }
+                            Ok(Event::Outgoing(Outgoing::Disconnect)) => {
+                                break;
+                            }
+                            Ok(_) => {}
+                            Err(_) => {
+                                failed_counter.fetch_add(1, Ordering::Relaxed);
+                                break;
+                            }
+                        }
                     }
                 }
             }
 
             worker.abort();
             let _ = worker.await;
-            latencies_us
+            client_hist
         });
 
         handles.push(handle);
     }
 
-    // Await completion of all client tasks and aggregate latency histogram
+    // Await completion of all client tasks and merge per-client histograms in O(1) memory
     let mut hist =
         Histogram::<u64>::new_with_bounds(1, 60_000_000, 3).expect("Failed to create histogram");
 
     for handle in handles {
-        if let Ok(client_latencies) = handle.await {
-            for lat_us in client_latencies {
-                let _ = hist.record(lat_us.clamp(1, 60_000_000));
-            }
+        if let Ok(client_hist) = handle.await {
+            let _ = hist.add(&client_hist);
         }
     }
 
+    signal_handle.abort();
     pb.finish_and_clear();
 
     // Calculate and print benchmark summary
