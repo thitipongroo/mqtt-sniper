@@ -75,7 +75,7 @@ jobs:
           Compress-Archive -Path dist/* -DestinationPath mqtt-sniper-${{ github.ref_name }}-${{ matrix.target }}.zip
 
       - name: Upload release asset
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             mqtt-sniper-${{ github.ref_name }}-${{ matrix.target }}.*
