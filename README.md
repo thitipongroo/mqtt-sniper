@@ -1,4 +1,4 @@
-# 🎯 MQTT Sniper (v1.0.0)
+# 🎯 MQTT Sniper
 
 [![Crates.io](https://img.shields.io/crates/v/mqtt-sniper.svg?style=for-the-badge&logo=rust)](https://crates.io/crates/mqtt-sniper)
 [![Docker](https://img.shields.io/badge/docker-multi--arch%20(amd64%2Farm64)-blue?style=for-the-badge&logo=docker)](https://github.com/thitipongroo/mqtt-sniper/pkgs/container/mqtt-sniper)
