@@ -435,11 +435,9 @@ jobs:
     runs-on: ubuntu-latest
     services:
       mosquitto:
-        image: eclipse-mosquitto:2.0
+        image: eclipse-mosquitto:1.6
         ports:
           - 1883:1883
-        options: >-
-          sh -c "echo -e 'listener 1883\nallow_anonymous true' > /mosquitto/config/mosquitto.conf && /usr/sbin/mosquitto -c /mosquitto/config/mosquitto.conf"
 
     steps:
       - uses: actions/checkout@v4
