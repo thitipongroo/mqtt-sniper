@@ -13,7 +13,7 @@ categories = ["command-line-utilities", "network-programming"]
 
 [dependencies]
 tokio = { version = "1.34", features = ["full"] }
-rumqttc = "0.24.0"
+rumqttc = "0.25.1"
 clap = { version = "4.4", features = ["derive"] }
 indicatif = "0.17"
 hdrhistogram = "7.5"
