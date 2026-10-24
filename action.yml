@@ -1,0 +1,101 @@
+name: 'MQTT Sniper SLA Check'
+description: 'High-performance MQTT load testing and CI/CD SLA quality gate'
+author: 'Thitipong Roongprasert'
+
+inputs:
+  broker-url:
+    description: 'Target MQTT broker URL, hostname, or IP address (e.g. localhost, mqtt://127.0.0.1:1883)'
+    required: true
+  clients:
+    description: 'Number of concurrent simulated IoT clients'
+    required: false
+    default: '100'
+  count:
+    description: 'Number of messages published or received per client'
+    required: false
+    default: '10'
+  duration:
+    description: 'Duration (seconds) for time-based soak testing (0 = use count)'
+    required: false
+    default: '0'
+  max-p95-ms:
+    description: 'SLO Gate: Maximum allowed p95 latency in milliseconds'
+    required: false
+    default: ''
+  min-success-rate:
+    description: 'SLO Gate: Minimum required success rate (e.g. 99.5 for 99.5%, or 0.995)'
+    required: false
+    default: ''
+  output-format:
+    description: 'Output format: json, text, or prometheus'
+    required: false
+    default: 'json'
+  output-file:
+    description: 'Path to export the benchmark report file'
+    required: false
+    default: 'mqtt-sniper-report.json'
+
+outputs:
+  report-json:
+    description: 'Path to the generated report file'
+    value: ${{ steps.run-sniper.outputs.report_file }}
+  status:
+    description: 'Pass or Fail based on SLA assertions'
+    value: ${{ steps.run-sniper.outputs.status }}
+
+runs:
+  using: 'composite'
+  steps:
+    - id: run-sniper
+      shell: bash
+      run: |
+        OUTPUT_FILE="${{ inputs.output-file }}"
+        OUTPUT_FORMAT="${{ inputs.output-format }}"
+        BROKER_URL="${{ inputs.broker-url }}"
+        CLIENTS="${{ inputs.clients }}"
+        COUNT="${{ inputs.count }}"
+        DURATION="${{ inputs.duration }}"
+        MAX_P95="${{ inputs.max-p95-ms }}"
+        MIN_RATE="${{ inputs.min-success-rate }}"
+
+        ARGS="--broker $BROKER_URL --clients $CLIENTS --messages $COUNT --duration-secs $DURATION --output $OUTPUT_FORMAT --output-file $OUTPUT_FILE"
+
+        if [ -n "$MAX_P95" ]; then
+          ARGS="$ARGS --max-p95-ms $MAX_P95"
+        fi
+
+        if [ -n "$MIN_RATE" ]; then
+          # Normalize percentage (e.g., 99.5 -> 0.995) if > 1.0
+          NORMALIZED_RATE=$(awk -v r="$MIN_RATE" 'BEGIN { if (r > 1.0) printf "%.4f", r / 100.0; else printf "%.4f", r }')
+          ARGS="$ARGS --min-success-rate $NORMALIZED_RATE"
+        fi
+
+        # Determine execution binary or container
+        if command -v mqtt-sniper &> /dev/null; then
+          EXEC_CMD="mqtt-sniper"
+        elif [ -f "./target/release/mqtt-sniper" ]; then
+          EXEC_CMD="./target/release/mqtt-sniper"
+        elif [ -f "${{ github.action_path }}/target/release/mqtt-sniper" ]; then
+          EXEC_CMD="${{ github.action_path }}/target/release/mqtt-sniper"
+        else
+          EXEC_CMD="docker run --rm --network host -v $PWD:/work -w /work ghcr.io/thitipongroo/mqtt-sniper:latest"
+        fi
+
+        echo "🚀 Running MQTT Sniper SLA Gate:"
+        echo "$EXEC_CMD $ARGS"
+
+        set +e
+        $EXEC_CMD $ARGS
+        EXIT_CODE=$?
+        set -e
+
+        echo "report_file=$OUTPUT_FILE" >> "$GITHUB_OUTPUT"
+
+        if [ $EXIT_CODE -eq 0 ]; then
+          echo "status=Pass" >> "$GITHUB_OUTPUT"
+          echo "✅ MQTT Sniper SLA Gate Passed!"
+        else
+          echo "status=Fail" >> "$GITHUB_OUTPUT"
+          echo "❌ MQTT Sniper SLA Gate Failed (exit code: $EXIT_CODE)"
+          exit $EXIT_CODE
+        fi

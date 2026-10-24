@@ -1,0 +1,58 @@
+name: SLA Check Example
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  sla-quality-gate:
+    name: MQTT Broker SLA Verification
+    runs-on: ubuntu-latest
+    services:
+      mosquitto:
+        image: eclipse-mosquitto:2.0
+        ports:
+          - 1883:1883
+        options: >-
+          sh -c "echo -e 'listener 1883\nallow_anonymous true' > /mosquitto/config/mosquitto.conf && /usr/sbin/mosquitto -c /mosquitto/config/mosquitto.conf"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build mqtt-sniper release binary
+        run: cargo build --release
+
+      - name: Add binary to PATH
+        run: echo "$PWD/target/release" >> $GITHUB_PATH
+
+      - name: Run MQTT Sniper SLA Check
+        id: sniper-sla
+        uses: ./
+        with:
+          broker-url: 'mqtt://localhost:1883'
+          clients: '50'
+          count: '20'
+          max-p95-ms: '100.0'
+          min-success-rate: '99.0'
+          output-format: 'json'
+          output-file: 'mqtt-sniper-report.json'
+
+      - name: Inspect SLA Gate Report
+        run: |
+          echo "SLA Quality Gate Status: ${{ steps.sniper-sla.outputs.status }}"
+          echo "Report Location: ${{ steps.sniper-sla.outputs.report-json }}"
+          cat mqtt-sniper-report.json
+
+      - name: Archive Benchmark Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mqtt-benchmark-sla-report
+          path: mqtt-sniper-report.json

@@ -121,6 +121,9 @@ pub fn default_test_args(port: u16, clients: usize, messages: usize, qos: u8, to
         key: None,
         max_p95_ms: None,
         min_success_rate: None,
+        output: mqtt_sniper::cli::OutputFormat::Text,
+        output_file: None,
+        quiet: true,
         output_json: None,
     }
 }

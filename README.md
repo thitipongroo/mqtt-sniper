@@ -38,12 +38,30 @@ Whether testing broker throughput, connection handshake storms, end-to-end fan-o
 cargo install mqtt-sniper
 ```
 
-### Option 2: Docker Container (Multi-Arch `linux/amd64` & `linux/arm64`)
+### Option 2: Docker Quickstart (Multi-Arch `linux/amd64` & `linux/arm64`)
+
+Production-ready, ultra-lightweight (<20MB) multi-architecture container images are automatically built and published to GitHub Container Registry (GHCR):
 
 ```bash
-# Pull and run the latest image from GitHub Container Registry
-docker run --rm ghcr.io/thitipongroo/mqtt-sniper:latest --help
+# 1. Pull the official multi-arch image
+docker pull ghcr.io/thitipongroo/mqtt-sniper:latest
+
+# 2. Run benchmark directly against a local broker using host networking
+docker run --rm --network host ghcr.io/thitipongroo/mqtt-sniper:latest \
+  --broker localhost \
+  --clients 100 \
+  --messages 10
+
+# 3. Mount current directory to pass template files and export JSON/Prometheus reports
+docker run --rm --network host \
+  -v "$(pwd)":/work -w /work \
+  ghcr.io/thitipongroo/mqtt-sniper:latest \
+  --broker 127.0.0.1 \
+  --output json \
+  --output-file report.json
 ```
+
+*Runs as unprivileged non-root user `sniper` (UID 10001) with pre-bundled `ca-certificates` and `tzdata`.*
 
 ### Option 3: Pre-compiled GitHub Release Binaries
 
@@ -206,7 +224,10 @@ Usage: mqtt-sniper [OPTIONS]
 | :--- | :---: | :---: | :--- |
 | `--max-p95-ms <MS>` | - | - | SLO Gate: Max allowed p95 latency in ms (exits with code 1 if breached) |
 | `--min-success-rate <RATIO>`| - | - | SLO Gate: Min required success rate `0.0` to `1.0` (exits with code 1 if breached) |
-| `--output-json <PATH>` | - | - | Export comprehensive JSON benchmark report to disk |
+| `--output <FORMAT>` | `-o` | `text` | Output format: `text` (human summary), `json` (machine schema), or `prometheus` |
+| `--output-file <PATH>` | - | - | Path to write the output report file directly to disk |
+| `--quiet` / `--silent` | `-s` | `false` | Suppress interactive progress bar and pre-flight banners for automated CI jobs |
+| `--output-json <PATH>` | - | - | Export comprehensive JSON benchmark report to disk (legacy alias) |
 | `--help` | `-h` | - | Print command-line help |
 | `--version` | `-V` | - | Print version information |
 
@@ -257,9 +278,130 @@ When publishing payloads via `--payload` or `--payload-file`, MQTT Sniper evalua
 
 ---
 
-## 📊 Benchmark Report & Terminal Output
+## 📊 Observability & Structured Outputs
 
-### Real-Time Terminal Summary
+MQTT Sniper is built from the ground up for deep observability, headless automated testing, and seamless integration with CI/CD quality pipelines and Prometheus/Grafana monitoring stacks.
+
+### 1. Structured JSON Report Schema (`--output json`)
+
+Run with `--output json` to output parseable, machine-readable JSON to `stdout` or save it directly using `--output-file report.json`:
+
+```bash
+mqtt-sniper \
+  --broker 127.0.0.1 \
+  --port 1883 \
+  --clients 1000 \
+  --messages 100 \
+  --qos 1 \
+  --max-p95-ms 50.0 \
+  --min-success-rate 0.99 \
+  --output json \
+  --output-file benchmark-report.json
+```
+
+```json
+{
+  "timestamp": "2026-10-24T15:30:00Z",
+  "target": {
+    "broker": "mqtt://127.0.0.1:1883",
+    "clients": 1000,
+    "qos": 1
+  },
+  "metrics": {
+    "total_messages": 100000,
+    "success_count": 99980,
+    "failure_count": 20,
+    "success_rate_percent": 99.98,
+    "duration_seconds": 10.45,
+    "throughput_msg_per_sec": 9569.37
+  },
+  "latency_ms": {
+    "min": 1.2,
+    "p50": 3.4,
+    "p90": 8.1,
+    "p95": 12.5,
+    "p99": 24.8,
+    "max": 85.0
+  },
+  "sla": {
+    "passed": true,
+    "max_p95_threshold_ms": 50.0,
+    "min_success_rate_threshold": 99.0
+  }
+}
+```
+
+#### Parsing with `jq` in CI Scripts
+
+Combine with `jq` to extract metrics or enforce custom assertions:
+
+```bash
+# Extract delivery success rate percentage
+mqtt-sniper --quiet --output json | jq .metrics.success_rate_percent
+
+# Extract 95th percentile latency (ms)
+mqtt-sniper --quiet --output json | jq .latency_ms.p95
+
+# Automated Quality Gate script assertion
+REPORT=$(mqtt-sniper --quiet --output json --max-p95-ms 30.0)
+STATUS=$(echo "$REPORT" | jq -r .sla.passed)
+if [ "$STATUS" != "true" ]; then
+  echo "❌ Performance regression: SLA breached!"
+  exit 1
+fi
+```
+
+### 2. Prometheus OpenMetrics Export (`--output prometheus`)
+
+Generate standard Prometheus text exposition format for scraping or piping directly to Prometheus Pushgateway:
+
+```bash
+mqtt-sniper --broker 127.0.0.1 --clients 500 --output prometheus
+```
+
+```prometheus
+# HELP mqtt_sniper_total_messages Total messages in benchmark target
+# TYPE mqtt_sniper_total_messages counter
+mqtt_sniper_total_messages 50000
+# HELP mqtt_sniper_success_count Successful messages or connections
+# TYPE mqtt_sniper_success_count counter
+mqtt_sniper_success_count 50000
+# HELP mqtt_sniper_failure_count Failed messages or clients
+# TYPE mqtt_sniper_failure_count counter
+mqtt_sniper_failure_count 0
+# HELP mqtt_sniper_success_rate_percent Success rate percentage
+# TYPE mqtt_sniper_success_rate_percent gauge
+mqtt_sniper_success_rate_percent 100.00
+# HELP mqtt_sniper_duration_seconds Total benchmark duration in seconds
+# TYPE mqtt_sniper_duration_seconds gauge
+mqtt_sniper_duration_seconds 4.21
+# HELP mqtt_sniper_throughput_msg_per_sec Messages published per second
+# TYPE mqtt_sniper_throughput_msg_per_sec gauge
+mqtt_sniper_throughput_msg_per_sec 11876.48
+# HELP mqtt_sniper_latency_min_ms Minimum latency in milliseconds
+# TYPE mqtt_sniper_latency_min_ms gauge
+mqtt_sniper_latency_min_ms 0.85
+# HELP mqtt_sniper_latency_p50_ms P50 latency in milliseconds
+# TYPE mqtt_sniper_latency_p50_ms gauge
+mqtt_sniper_latency_p50_ms 2.15
+# HELP mqtt_sniper_latency_p90_ms P90 latency in milliseconds
+# TYPE mqtt_sniper_latency_p90_ms gauge
+mqtt_sniper_latency_p90_ms 4.50
+# HELP mqtt_sniper_latency_p95_ms P95 latency in milliseconds
+# TYPE mqtt_sniper_latency_p95_ms gauge
+mqtt_sniper_latency_p95_ms 6.80
+# HELP mqtt_sniper_latency_p99_ms P99 latency in milliseconds
+# TYPE mqtt_sniper_latency_p99_ms gauge
+mqtt_sniper_latency_p99_ms 11.20
+# HELP mqtt_sniper_latency_max_ms Maximum latency in milliseconds
+# TYPE mqtt_sniper_latency_max_ms gauge
+mqtt_sniper_latency_max_ms 24.50
+# HELP mqtt_sniper_sla_passed Whether the benchmark satisfied SLA quality gates (1 = passed, 0 = breached)
+# TYPE mqtt_sniper_sla_passed gauge
+mqtt_sniper_sla_passed 1
+```
+
+### 3. Human-Readable Terminal Summary (`--output text`)
 
 ```text
 🚀 Starting MQTT Sniper (MQTT v5.0)...
@@ -269,80 +411,63 @@ Spawning 500 concurrent Pub clients (200 msgs/client, QoS 1)...
 ✅ Load test completed in 3.42s (MQTT v5.0)
 📊 Total messages sent: 100000 / 100000 (Malformed injected: 0, Failed clients: 0, Success rate: 100.00%)
 ⚡ Throughput: 29239.77 msgs/sec
-⏱️  Latency (ms): min=0.42 | avg=1.85 | p50=1.62 | p95=3.40 | p99=5.12 | max=11.80
-💾 Saved JSON benchmark report to benchmark.json
-```
-
-### Machine-Readable JSON Export (`--output-json`)
-
-```json
-{
-  "broker": "127.0.0.1",
-  "port": 1883,
-  "mode": "pub",
-  "mqtt_version": 5,
-  "tls": false,
-  "clients": 500,
-  "messages_per_client": 200,
-  "duration_secs": 0,
-  "qos": 1,
-  "retain": false,
-  "clean_session": true,
-  "target_messages": 100000,
-  "actual_sent": 100000,
-  "malformed_sent": 0,
-  "failed_clients": 0,
-  "success_rate": 1.0,
-  "slo_passed": true,
-  "elapsed_secs": 3.42,
-  "throughput_msgs_per_sec": 29239.77,
-  "latency_min_ms": 0.42,
-  "latency_avg_ms": 1.85,
-  "latency_p50_ms": 1.62,
-  "latency_p95_ms": 3.40,
-  "latency_p99_ms": 5.12,
-  "latency_max_ms": 11.80
-}
+⏱️  Latency (ms): min=0.42 | avg=1.85 | p50=1.62 | p90=2.85 | p95=3.40 | p99=5.12 | max=11.80
 ```
 
 ---
 
-## 🤖 GitHub Actions CI/CD Integration
+## 🤖 CI/CD Quality Gate (GitHub Actions)
 
-Use MQTT Sniper in your GitHub Actions workflows to automatically detect performance regressions and verify broker SLO compliance on every commit:
+Integrate MQTT Sniper directly into your pull requests and release pipelines to prevent throughput regressions and latency breaches before deploying to production.
+
+### Reusable Composite Action (`action.yml`)
+
+Add the composite action directly into your GitHub Actions workflow:
 
 ```yaml
-name: MQTT Performance Gate
+name: MQTT Broker SLA Verification
 
 on: [push, pull_request]
 
 jobs:
-  mqtt-benchmark:
+  sla-test:
+    name: Broker Benchmark & Quality Gate
     runs-on: ubuntu-latest
+    services:
+      mosquitto:
+        image: eclipse-mosquitto:2.0
+        ports:
+          - 1883:1883
+        options: >-
+          sh -c "echo -e 'listener 1883\nallow_anonymous true' > /mosquitto/config/mosquitto.conf && /usr/sbin/mosquitto -c /mosquitto/config/mosquitto.conf"
+
     steps:
       - uses: actions/checkout@v4
 
-      - name: Start EMQX Broker
-        run: docker run -d --name emqx -p 1883:1883 emqx/emqx:5.8.0
+      # Execute MQTT Sniper SLA Assertion
+      - name: Run MQTT Sniper SLA Check
+        id: sniper
+        uses: thitipongroo/mqtt-sniper@main
+        with:
+          broker-url: 'mqtt://localhost:1883'
+          clients: 100
+          count: 50
+          max-p95-ms: 30.0
+          min-success-rate: 99.5
+          output-format: 'json'
+          output-file: 'sla-report.json'
 
-      - name: Run MQTT Sniper Benchmark
+      - name: Check Gate Status
         run: |
-          docker run --rm --network host ghcr.io/thitipongroo/mqtt-sniper:latest \
-            --broker 127.0.0.1 \
-            --mqtt-version 5 \
-            --clients 500 \
-            --messages 100 \
-            --qos 1 \
-            --max-p95-ms 25.0 \
-            --min-success-rate 0.999 \
-            --output-json report.json
+          echo "Status: ${{ steps.sniper.outputs.status }}"
+          echo "Report: ${{ steps.sniper.outputs.report-json }}"
 
-      - name: Archive Benchmark Artifacts
+      - name: Archive Benchmark Report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: benchmark-report
-          path: report.json
+          name: mqtt-sla-report
+          path: sla-report.json
 ```
 
 ---

@@ -16,11 +16,24 @@ pub enum Mode {
     Conn,
 }
 
+/// Output format for benchmark reports
+#[derive(ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OutputFormat {
+    /// Human-readable terminal output with real-time statistics
+    #[default]
+    Text,
+    /// Structured JSON schema formatted for automated analysis and CI pipelines
+    Json,
+    /// Prometheus OpenMetrics text format for scraping and Grafana dashboards
+    Prometheus,
+}
+
 /// CLI argument parsing structure
 #[derive(Parser, Debug, Clone)]
 #[command(author, version, about = "Blazing fast MQTT Load Tester")]
 pub struct Args {
-    /// Target MQTT broker hostname or IP address
+    /// Target MQTT broker hostname, IP address, or URL (e.g. localhost, mqtt://127.0.0.1:1883, or mqtts://broker:8883)
     #[arg(short, long, default_value = "localhost")]
     pub broker: String,
 
@@ -139,9 +152,50 @@ pub struct Args {
     #[arg(long)]
     pub min_success_rate: Option<f64>,
 
-    /// Path to export benchmark report as a JSON file
+    /// Output format: 'text', 'json', or 'prometheus'
+    #[arg(short = 'o', long, value_enum, default_value_t = OutputFormat::Text)]
+    pub output: OutputFormat,
+
+    /// Path to write output report to a file
+    #[arg(long)]
+    pub output_file: Option<String>,
+
+    /// Suppress interactive progress bar and informational logs
+    #[arg(long, short = 's', alias = "silent", default_value_t = false)]
+    pub quiet: bool,
+
+    /// Path to export benchmark report as a JSON file (legacy alias)
     #[arg(long)]
     pub output_json: Option<String>,
+}
+
+pub fn normalize_broker_target(args: &mut Args) {
+    let raw = args.broker.trim().to_string();
+    if let Some(rest) = raw.strip_prefix("mqtts://") {
+        args.tls = true;
+        parse_host_and_port(rest, args, 8883);
+    } else if let Some(rest) = raw.strip_prefix("ssl://") {
+        args.tls = true;
+        parse_host_and_port(rest, args, 8883);
+    } else if let Some(rest) = raw.strip_prefix("mqtt://") {
+        parse_host_and_port(rest, args, 1883);
+    } else if let Some(rest) = raw.strip_prefix("tcp://") {
+        parse_host_and_port(rest, args, 1883);
+    }
+}
+
+fn parse_host_and_port(input: &str, args: &mut Args, default_port: u16) {
+    if let Some((host, port_str)) = input.rsplit_once(':') {
+        args.broker = host.to_string();
+        if let Ok(p) = port_str.parse::<u16>() {
+            args.port = p;
+        }
+    } else {
+        args.broker = input.to_string();
+        if args.port == 1883 && default_port != 1883 {
+            args.port = default_port;
+        }
+    }
 }
 
 pub fn parse_qos(qos: u8) -> QoS {
@@ -271,6 +325,9 @@ mod tests {
         assert_eq!(args.key, None);
         assert_eq!(args.max_p95_ms, None);
         assert_eq!(args.min_success_rate, None);
+        assert_eq!(args.output, OutputFormat::Text);
+        assert_eq!(args.output_file, None);
+        assert!(!args.quiet);
         assert_eq!(args.output_json, None);
     }
 
@@ -334,8 +391,13 @@ mod tests {
             "100.0",
             "--min-success-rate",
             "0.995",
-            "--output-json",
+            "--output",
+            "json",
+            "--output-file",
             "report.json",
+            "--quiet",
+            "--output-json",
+            "legacy-report.json",
         ]);
         assert_eq!(args.broker, "10.0.0.1");
         assert_eq!(args.port, 8883);
@@ -366,7 +428,39 @@ mod tests {
         assert_eq!(args.key, Some("client.key".to_string()));
         assert_eq!(args.max_p95_ms, Some(100.0));
         assert_eq!(args.min_success_rate, Some(0.995));
-        assert_eq!(args.output_json, Some("report.json".to_string()));
+        assert_eq!(args.output, OutputFormat::Json);
+        assert_eq!(args.output_file, Some("report.json".to_string()));
+        assert!(args.quiet);
+        assert_eq!(args.output_json, Some("legacy-report.json".to_string()));
+
+        // Check --silent alias
+        let silent_args = Args::parse_from(["mqtt-sniper", "--silent"]);
+        assert!(silent_args.quiet);
+    }
+
+    #[test]
+    fn test_normalize_broker_target() {
+        let mut args1 = Args::parse_from(["mqtt-sniper", "-b", "mqtt://10.0.0.1:1884"]);
+        normalize_broker_target(&mut args1);
+        assert_eq!(args1.broker, "10.0.0.1");
+        assert_eq!(args1.port, 1884);
+        assert!(!args1.tls);
+
+        let mut args2 = Args::parse_from(["mqtt-sniper", "-b", "mqtts://secure-broker.io"]);
+        normalize_broker_target(&mut args2);
+        assert_eq!(args2.broker, "secure-broker.io");
+        assert_eq!(args2.port, 8883);
+        assert!(args2.tls);
+
+        let mut args3 = Args::parse_from(["mqtt-sniper", "-b", "tcp://my-broker:1883"]);
+        normalize_broker_target(&mut args3);
+        assert_eq!(args3.broker, "my-broker");
+        assert_eq!(args3.port, 1883);
+
+        let mut args4 = Args::parse_from(["mqtt-sniper", "-b", "plain-host", "-p", "1885"]);
+        normalize_broker_target(&mut args4);
+        assert_eq!(args4.broker, "plain-host");
+        assert_eq!(args4.port, 1885);
     }
 
     #[test]

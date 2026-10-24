@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-10-24
+
+* Added - **Production Multi-Stage Dockerfile & GHCR Multi-Arch Publishing**: Built an ultra-lightweight (<20MB) multi-stage Alpine Docker image running under non-root user `sniper` (UID 10001) with pre-installed `ca-certificates` and `tzdata`, backed by automated multi-architecture (`linux/amd64`, `linux/arm64`) GitHub Actions (`.github/workflows/docker-publish.yml`).
+* Added - **Reusable Composite GitHub Action (`action.yml`)**: Root-level composite action allowing CI/CD workflows to assert broker SLAs (`--max-p95-ms`, `--min-success-rate`) with automated quality gating, outputs (`status`, `report-json`), and Mosquitto test example (`.github/workflows/sla-check-example.yml`).
+* Added - **Observability & Structured Formats (`--output`, `--output-file`, `--quiet`)**: Added `--output <text|json|prometheus>` and `--output-file <PATH>` supporting structured JSON schema with ISO-8601 timestamps, percentiles (p50, p90, p95, p99), and standard Prometheus OpenMetrics text format.
+* Added - **Broker URL Auto-Normalization**: Added automatic scheme parsing (`mqtt://`, `mqtts://`, `tcp://`, `ssl://`) in `--broker` to auto-configure ports and TLS flags.
+
 ## [1.0.0] - 2026-10-19
 
 * Added - **MQTT v5.0 Protocol Support (`--mqtt-version 5`)**: Added full support for MQTT v5.0 (`rumqttc::v5`) across `pub`, `sub`, and `conn` modes while maintaining backward compatibility with MQTT v3.1.1 (`--mqtt-version 3` or `4`).

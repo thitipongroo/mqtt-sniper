@@ -63,8 +63,84 @@ async fn test_json_report_export() {
     assert!(tmp_path.exists());
 
     let content = fs::read_to_string(&tmp_path).unwrap();
-    assert!(content.contains(r#""actual_sent": 2"#));
-    assert!(content.contains(r#""latency_p99_ms""#));
+    let parsed: serde_json::Value = serde_json::from_str(&content).expect("Valid JSON");
+    assert_eq!(parsed["metrics"]["success_count"], 2);
+    assert_eq!(parsed["metrics"]["total_messages"], 2);
+    assert!(parsed.get("latency_ms").is_some());
+    assert!(parsed.get("sla").is_some());
+    let _ = fs::remove_file(&tmp_path);
+}
+
+#[tokio::test]
+async fn test_output_json_option_and_output_file() {
+    let clients = 1;
+    let messages = 2;
+    let port = start_mock_broker(1, clients).await;
+    let tmp_path = std::env::temp_dir().join("mqtt_sniper_test_output_file.json");
+    let tmp_path_str = tmp_path.to_str().unwrap().to_string();
+
+    let mut args = default_test_args(port, clients, messages, 1, "test/output_file");
+    args.output = mqtt_sniper::cli::OutputFormat::Json;
+    args.output_file = Some(tmp_path_str);
+    args.max_p95_ms = Some(100.0);
+    args.min_success_rate = Some(0.99);
+
+    let report = run_load_test(args).await;
+    assert!(report.slo_passed);
+    assert!(tmp_path.exists());
+
+    let content = fs::read_to_string(&tmp_path).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&content).expect("Valid JSON");
+    assert_eq!(parsed["sla"]["passed"], true);
+    assert_eq!(parsed["sla"]["max_p95_threshold_ms"], 100.0);
+    assert_eq!(parsed["sla"]["min_success_rate_threshold"], 99.0);
+    assert_eq!(parsed["target"]["qos"], 1);
+    let _ = fs::remove_file(&tmp_path);
+}
+
+#[tokio::test]
+async fn test_output_prometheus_option() {
+    let clients = 1;
+    let messages = 2;
+    let port = start_mock_broker(1, clients).await;
+    let tmp_path = std::env::temp_dir().join("mqtt_sniper_test_metrics.prom");
+    let tmp_path_str = tmp_path.to_str().unwrap().to_string();
+
+    let mut args = default_test_args(port, clients, messages, 1, "test/prom");
+    args.output = mqtt_sniper::cli::OutputFormat::Prometheus;
+    args.output_file = Some(tmp_path_str);
+
+    let report = run_load_test(args).await;
+    assert_eq!(report.actual_sent, 2);
+    assert!(tmp_path.exists());
+
+    let content = fs::read_to_string(&tmp_path).unwrap();
+    assert!(content.contains("mqtt_sniper_throughput_msg_per_sec"));
+    assert!(content.contains("mqtt_sniper_latency_p95_ms"));
+    assert!(content.contains("mqtt_sniper_sla_passed 1"));
+    let _ = fs::remove_file(&tmp_path);
+}
+
+#[tokio::test]
+async fn test_sla_breach_detection() {
+    let clients = 1;
+    let messages = 2;
+    let port = start_mock_broker(1, clients).await;
+    let tmp_path = std::env::temp_dir().join("mqtt_sniper_test_sla_fail.json");
+    let tmp_path_str = tmp_path.to_str().unwrap().to_string();
+
+    let mut args = default_test_args(port, clients, messages, 1, "test/sla_fail");
+    args.output = mqtt_sniper::cli::OutputFormat::Json;
+    args.output_file = Some(tmp_path_str);
+    args.max_p95_ms = Some(0.00001);
+
+    let report = run_load_test(args).await;
+    assert!(!report.slo_passed);
+    assert!(!report.sla.passed);
+
+    let content = fs::read_to_string(&tmp_path).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&content).expect("Valid JSON");
+    assert_eq!(parsed["sla"]["passed"], false);
     let _ = fs::remove_file(&tmp_path);
 }
 

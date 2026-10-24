@@ -1,0 +1,10 @@
+target/
+.git/
+.github/
+*.log
+*.tmp
+*.json
+*.pem
+*.crt
+*.key
+dist/

@@ -1,4 +1,7 @@
-use crate::cli::{Args, Mode, build_transport, parse_qos, resolve_payload_template};
+use crate::cli::{
+    Args, Mode, OutputFormat, build_transport, normalize_broker_target, parse_qos,
+    resolve_payload_template,
+};
 use crate::payload::build_payload_with_chaos;
 use crate::report::BenchmarkReport;
 use hdrhistogram::Histogram;
@@ -570,7 +573,8 @@ async fn run_client_v5(ctx: ClientSpawnContext) -> Histogram<u64> {
     client_hist
 }
 
-pub async fn run_load_test(args: Args) -> BenchmarkReport {
+pub async fn run_load_test(mut args: Args) -> BenchmarkReport {
+    normalize_broker_target(&mut args);
     let target_messages = if args.mode == Mode::Conn {
         args.clients
     } else {
@@ -595,26 +599,32 @@ pub async fn run_load_test(args: Args) -> BenchmarkReport {
         "v3.1.1"
     };
 
-    println!("🚀 Starting MQTT Sniper (MQTT {})...", proto_label);
-    println!("Broker: {}://{}:{}", scheme, args.broker, args.port);
-    if args.mode == Mode::Conn {
-        println!(
-            "Spawning {} concurrent Conn clients (hold {}s, clean_session={})...",
-            args.clients, args.duration_secs, args.clean_session
-        );
-    } else if args.duration_secs > 0 {
-        println!(
-            "Spawning {} concurrent {:?} clients (duration {}s, QoS {})...",
-            args.clients, args.mode, args.duration_secs, args.qos
-        );
-    } else {
-        println!(
-            "Spawning {} concurrent {:?} clients ({} msgs/client, QoS {})...",
-            args.clients, args.mode, args.messages, args.qos
-        );
+    let is_quiet = args.quiet || args.output != OutputFormat::Text;
+
+    if !is_quiet {
+        println!("🚀 Starting MQTT Sniper (MQTT {})...", proto_label);
+        println!("Broker: {}://{}:{}", scheme, args.broker, args.port);
+        if args.mode == Mode::Conn {
+            println!(
+                "Spawning {} concurrent Conn clients (hold {}s, clean_session={})...",
+                args.clients, args.duration_secs, args.clean_session
+            );
+        } else if args.duration_secs > 0 {
+            println!(
+                "Spawning {} concurrent {:?} clients (duration {}s, QoS {})...",
+                args.clients, args.mode, args.duration_secs, args.qos
+            );
+        } else {
+            println!(
+                "Spawning {} concurrent {:?} clients ({} msgs/client, QoS {})...",
+                args.clients, args.mode, args.messages, args.qos
+            );
+        }
     }
 
-    let pb = if args.duration_secs > 0 && args.mode != Mode::Conn {
+    let pb = if is_quiet {
+        ProgressBar::hidden()
+    } else if args.duration_secs > 0 && args.mode != Mode::Conn {
         let spinner = ProgressBar::new_spinner();
         if let Ok(style) = ProgressStyle::with_template(
             "{spinner:.green} [{elapsed_precise}] {pos} msgs | {per_sec}",
@@ -734,7 +744,53 @@ pub async fn run_load_test(args: Args) -> BenchmarkReport {
     let errors = failed_clients.load(Ordering::Relaxed);
 
     let report = BenchmarkReport::new(&args, elapsed, actual_sent, malformed_sent, errors, &hist);
-    report.print_summary(elapsed);
+
+    match args.output {
+        OutputFormat::Text => {
+            report.print_summary(elapsed);
+            if let Some(ref path) = args.output_file {
+                if path.ends_with(".json") {
+                    report.save_json(path);
+                } else {
+                    let action_label = match report.mode {
+                        Mode::Pub => "messages sent",
+                        Mode::Sub => "messages received",
+                        Mode::Conn => "clients connected",
+                    };
+                    let summary_str = format!(
+                        "Load test completed in {:.2?}\nTotal {}: {} / {}\nThroughput: {:.2} msgs/sec\nLatency (ms): min={:.2} | p50={:.2} | p90={:.2} | p95={:.2} | p99={:.2} | max={:.2}\nSLO passed: {}\n",
+                        elapsed,
+                        action_label,
+                        report.actual_sent,
+                        report.target_messages,
+                        report.throughput_msgs_per_sec,
+                        report.latency_min_ms,
+                        report.latency_p50_ms,
+                        report.latency_p90_ms,
+                        report.latency_p95_ms,
+                        report.latency_p99_ms,
+                        report.latency_max_ms,
+                        report.slo_passed
+                    );
+                    report.save_file(path, &summary_str);
+                }
+            }
+        }
+        OutputFormat::Json => {
+            let json_str = report.to_json_string();
+            println!("{}", json_str);
+            if let Some(ref path) = args.output_file {
+                report.save_file(path, &json_str);
+            }
+        }
+        OutputFormat::Prometheus => {
+            let prom_str = report.to_prometheus();
+            print!("{}", prom_str);
+            if let Some(ref path) = args.output_file {
+                report.save_file(path, &prom_str);
+            }
+        }
+    }
 
     if let Some(ref path) = args.output_json {
         report.save_json(path);

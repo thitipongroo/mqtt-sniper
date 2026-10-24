@@ -1,4 +1,4 @@
-# Stage 1: Build binary
+# Stage 1: Build binary with Alpine musl toolchain
 FROM rust:alpine AS builder
 RUN apk add --no-cache musl-dev gcc
 WORKDIR /usr/src/mqtt-sniper
@@ -7,12 +7,17 @@ WORKDIR /usr/src/mqtt-sniper
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 
-# Build release binary
+# Build release binary (stripped & LTO via Cargo.toml release profile)
 RUN cargo build --release
 
-# Stage 2: Minimal runtime image
-FROM alpine:3.20
-RUN apk add --no-cache ca-certificates
+# Stage 2: Minimal runtime image (<20MB)
+FROM alpine:latest
+RUN apk add --no-cache ca-certificates tzdata && \
+    adduser -D -u 10001 -g "" sniper
+
 COPY --from=builder /usr/src/mqtt-sniper/target/release/mqtt-sniper /usr/local/bin/mqtt-sniper
 
-ENTRYPOINT ["mqtt-sniper"]
+USER sniper
+
+ENTRYPOINT ["/usr/local/bin/mqtt-sniper"]
+CMD ["--help"]
