@@ -5,6 +5,7 @@
 [![MQTT](https://img.shields.io/badge/MQTT-v3.1.1%20%7C%20v5.0-660066?style=for-the-badge&logo=mqtt)](https://mqtt.org/)
 [![CI/CD](https://img.shields.io/github/actions/workflow/status/thitipongroo/mqtt-sniper/ci.yml?branch=main&style=for-the-badge&logo=github)](https://github.com/thitipongroo/mqtt-sniper/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg?style=for-the-badge)](https://opensource.org/licenses/MIT)
+[![GitHub Sponsors](https://img.shields.io/github/sponsors/thitipongroo?style=flat-square&color=ea4aaa&logo=github)](https://github.com/sponsors/thitipongroo)
 
 **MQTT Sniper** is an enterprise-grade, high-performance MQTT load testing and benchmarking tool written in Rust. Powered by the **Tokio** asynchronous runtime and **rumqttc**, it can simulate hundreds of thousands of concurrent IoT devices across **MQTT v3.1.1** and **MQTT v5.0** brokers from a single machine with bounded O(1) memory footprint.
 
@@ -474,6 +475,20 @@ jobs:
 
 * **[sentinel-iot-platform](https://github.com/thitipongroo/sentinel-iot-platform)**: Complete, enterprise IoT ingestion and device shadow orchestration platform.
 * **[mqtt-mock-sensor](https://github.com/thitipongroo/mqtt-mock-sensor)**: Zero-config Node.js IoT sensor telemetry simulator (`npx mqtt-mock-sensor`) for realistic GPS, power, and environmental telemetry generation.
+
+---
+
+## 💖 Sponsoring & Enterprise Backers
+
+`mqtt-sniper` is an open-source, high-performance load testing engine built to help teams build resilient IoT infrastructures. Sponsoring helps ensure continued active maintenance, performance optimizations, and future enhancements.
+
+If your organization relies on `mqtt-sniper` for IoT benchmarking or CI/CD SLA validation, consider becoming a sponsor:
+
+- 🥉 **Bronze Sponsor ($100/mo):** Company logo featured in this README and priority issue handling.
+- 🥈 **Silver Sponsor ($300/mo):** Medium logo featured, priority bug fixes, and direct advisory channel.
+- 🥇 **Gold / Enterprise Sponsor ($1,000/mo):** Hero logo placement, custom feature prioritization, and monthly architecture review.
+
+👉 **[Become a Sponsor on GitHub](https://github.com/sponsors/thitipongroo)**
 
 ---
 
