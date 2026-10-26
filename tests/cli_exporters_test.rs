@@ -76,7 +76,12 @@ async fn test_cli_output_json_and_output_file() {
     assert_eq!(file_json["metrics"]["failure_count"], 0);
     assert_eq!(file_json["metrics"]["success_rate_percent"], 100.0);
     assert!(file_json["metrics"]["duration_seconds"].as_f64().unwrap() >= 0.0);
-    assert!(file_json["metrics"]["throughput_msg_per_sec"].as_f64().unwrap() >= 0.0);
+    assert!(
+        file_json["metrics"]["throughput_msg_per_sec"]
+            .as_f64()
+            .unwrap()
+            >= 0.0
+    );
 
     assert!(file_json["latency_ms"]["min"].is_number());
     assert!(file_json["latency_ms"]["p50"].is_number());
@@ -149,7 +154,10 @@ async fn test_cli_output_prometheus_and_output_file() {
 
     assert!(prom_content.contains("# HELP mqtt_sniper_total_messages"));
     assert!(prom_content.contains("# TYPE mqtt_sniper_total_messages counter"));
-    assert!(prom_content.contains(&format!("mqtt_sniper_total_messages {}", clients * messages)));
+    assert!(prom_content.contains(&format!(
+        "mqtt_sniper_total_messages {}",
+        clients * messages
+    )));
     assert!(prom_content.contains(&format!("mqtt_sniper_success_count {}", clients * messages)));
     assert!(prom_content.contains("mqtt_sniper_failure_count 0"));
     assert!(prom_content.contains("mqtt_sniper_success_rate_percent 100.00"));

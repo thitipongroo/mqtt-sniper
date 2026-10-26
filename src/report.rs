@@ -445,10 +445,11 @@ impl BenchmarkReport {
 
     pub fn save_json(&self, path: &str) {
         let json_str = self.to_json_string();
-        if let Some(parent) = std::path::Path::new(path).parent() {
-            if !parent.as_os_str().is_empty() {
-                let _ = fs::create_dir_all(parent);
-            }
+        if let Some(parent) = std::path::Path::new(path)
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+        {
+            let _ = fs::create_dir_all(parent);
         }
         if let Err(e) = fs::write(path, json_str) {
             eprintln!("⚠️ Failed to write JSON report to {}: {}", path, e);
@@ -458,10 +459,11 @@ impl BenchmarkReport {
     }
 
     pub fn save_file(&self, path: &str, content: &str) {
-        if let Some(parent) = std::path::Path::new(path).parent() {
-            if !parent.as_os_str().is_empty() {
-                let _ = fs::create_dir_all(parent);
-            }
+        if let Some(parent) = std::path::Path::new(path)
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+        {
+            let _ = fs::create_dir_all(parent);
         }
         if let Err(e) = fs::write(path, content) {
             eprintln!("⚠️ Failed to write report to {}: {}", path, e);
