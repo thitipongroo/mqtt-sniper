@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-10-26
+
+* Added - **Single-Node Broker SLA Quality Gate Workflow (`.github/workflows/ci-sla-gate.yml`)**: Pre-configured CI/CD workflow running single-node SLA performance verification (`--max-p95-ms 50`, `--min-success-rate 99.9`) against Mosquitto broker service with automated telemetry artifacts upload.
+* Added - **Host:Port & IPv6 Target Auto-Normalization**: Enhanced `--broker` address resolution in `normalize_broker_target` to automatically parse `host:port` (e.g. `localhost:1883`) and bracketed IPv6 (e.g. `[::1]:1883`) even when protocol scheme (`mqtt://`) is omitted.
+* Added - **Docker Fallback File Permissions in Composite Action (`action.yml`)**: Added user mapping (`--user $(id -u):$(id -g)`) and output file initialization (`touch`/`chmod 666`) to ensure telemetry reports can be written to the host filesystem without permission issues when running as unprivileged container user.
+* Added - **Community Health & Issue Templates (`.github/ISSUE_TEMPLATE/`)**: Added structured GitHub issue forms for bug reports, feature requests, and a comprehensive pull request checklist template.
+* Added - **Sponsorship & Funding Channels (`.github/FUNDING.yml`)**: Expanded community sponsorship channels to include GitHub Sponsors, Ko-fi, Buy Me a Coffee, and PulseIoT Enterprise TaaS advisory.
+* Fixed - Fixed an issue where passing `broker-url` as `localhost:1883` caused target address to be concatenated as `mqtt://localhost:1883:1883`.
+* Fixed - Fixed Mosquitto 2.0+ default anonymous rejection and local-only interface binding in CI service configurations by standardizing on `eclipse-mosquitto:1.6`.
+
 ## [1.1.0] - 2026-10-24
 
 * Added - **Production Multi-Stage Dockerfile & GHCR Multi-Arch Publishing**: Built an ultra-lightweight (<20MB) multi-stage Alpine Docker image running under non-root user `sniper` (UID 10001) with pre-installed `ca-certificates` and `tzdata`, backed by automated multi-architecture (`linux/amd64`, `linux/arm64`) GitHub Actions (`.github/workflows/docker-publish.yml`).

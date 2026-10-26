@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 🛡️ Security Vulnerability Report
+    url: https://github.com/thitipongroo/mqtt-sniper/security/policy
+    about: Please report security vulnerabilities privately according to our security policy.
+  - name: 💬 Community Discussions & Questions
+    url: https://github.com/thitipongroo/mqtt-sniper/discussions
+    about: Ask questions, share architectures, and discuss benchmarking setups.
+  - name: ⚡ Enterprise Distributed TaaS
+    url: https://pulseiot-cloud.com/#taas
+    about: Need 1M - 10M concurrent client mesh testing or certified broker audit?

@@ -18,3 +18,7 @@ target/
 .vscode/
 .idea/
 *.swp
+
+# Benchmark Reports
+*-report.json
+mqtt-sniper-report.json

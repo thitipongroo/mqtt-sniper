@@ -90,6 +90,7 @@ pub async fn start_mock_broker_with_version(
     port
 }
 
+#[allow(dead_code)]
 pub fn default_test_args(port: u16, clients: usize, messages: usize, qos: u8, topic: &str) -> Args {
     Args {
         broker: "127.0.0.1".to_string(),

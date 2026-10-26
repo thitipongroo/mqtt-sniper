@@ -1,0 +1,48 @@
+name: 🐛 Bug Report
+description: Create a bug report to help improve mqtt-sniper
+title: '[Bug]: '
+labels: ['bug', 'triage']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting an issue! Please check existing issues to avoid duplicates.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Bug Description
+      description: A clear and concise description of what the bug is.
+      placeholder: Tell us what happened...
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to Reproduce
+      description: Steps or command-line arguments used to reproduce the behavior.
+      placeholder: |
+        1. Run command: `mqtt-sniper --broker ...`
+        2. Observed output: ...
+        3. Expected behavior: ...
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: OS version, Rust version, and target MQTT broker.
+      placeholder: e.g. Ubuntu 24.04 / Windows 11, Rust 1.85, Mosquitto 2.0 / EMQX 5.0
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Terminal Logs & Output
+      description: Paste any terminal output, panic stack traces, or relevant logs.
+      render: shell
+    validations:
+      required: false

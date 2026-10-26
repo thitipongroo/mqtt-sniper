@@ -509,7 +509,7 @@ If your organization relies on `mqtt-sniper` for IoT benchmarking or CI/CD SLA v
 - 🥈 **Silver Sponsor ($300/mo):** Medium logo featured, priority bug fixes, and direct advisory channel.
 - 🥇 **Gold / Enterprise Sponsor ($1,000/mo):** Hero logo placement, custom feature prioritization, and monthly architecture review.
 
-👉 **[Become a Sponsor on GitHub](https://github.com/sponsors/thitipongroo)**
+👉 **[Become a Sponsor on GitHub](https://github.com/sponsors/thitipongroo)** &nbsp;|&nbsp; ☕ **[Support on Ko-fi](https://ko-fi.com/thitipongroo)** &nbsp;|&nbsp; 💛 **[Buy Me a Coffee](https://buymeacoffee.com/thitipongroo)**
 
 ---
 

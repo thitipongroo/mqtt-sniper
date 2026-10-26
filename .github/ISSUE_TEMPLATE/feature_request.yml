@@ -1,0 +1,35 @@
+name: 💡 Feature Request
+description: Suggest an idea or feature enhancement for mqtt-sniper
+title: '[Feature]: '
+labels: ['enhancement']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        We welcome ideas for new load testing features, CLI parameters, and metrics integrations!
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or Use Case
+      description: Is your feature request related to a specific benchmarking limitation or need?
+      placeholder: I'm benchmarking an IoT broker that requires...
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed_solution
+    attributes:
+      label: Proposed Solution / CLI Design
+      description: Describe what you would like to see implemented or proposed flags.
+      placeholder: Add `--rate-limit <MSGS_PER_SEC>` flag to...
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: Any alternative solutions or workarounds you have considered.
+    validations:
+      required: false
