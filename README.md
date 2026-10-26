@@ -281,7 +281,19 @@ When publishing payloads via `--payload` or `--payload-file`, MQTT Sniper evalua
 
 ## 📊 Observability & Structured Outputs
 
-MQTT Sniper is built from the ground up for deep observability, headless automated testing, and seamless integration with CI/CD quality pipelines and Prometheus/Grafana monitoring stacks.
+MQTT Sniper is built from the ground up for deep observability, headless automated testing, and seamless integration with CI/CD quality pipelines and metric collectors (Terminal in -> Raw data out).
+
+### Pure Terminal Usage Guide
+
+Export clean raw data directly to disk or stdout without interactive terminal noise:
+
+```bash
+# Output raw JSON to file for automation
+mqtt-sniper --broker localhost:1883 --clients 100 --messages 10 --output json --output-file report.json --quiet
+
+# Output Prometheus OpenMetrics for metric collectors
+mqtt-sniper --broker localhost:1883 --clients 100 --messages 10 --output prometheus --output-file metrics.prom --quiet
+```
 
 ### 1. Structured JSON Report Schema (`--output json`)
 

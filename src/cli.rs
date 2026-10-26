@@ -25,7 +25,7 @@ pub enum OutputFormat {
     Text,
     /// Structured JSON schema formatted for automated analysis and CI pipelines
     Json,
-    /// Prometheus OpenMetrics text format for scraping and Grafana dashboards
+    /// Prometheus OpenMetrics text format for scraping and metric collectors
     Prometheus,
 }
 
