@@ -181,14 +181,36 @@ pub fn normalize_broker_target(args: &mut Args) {
         parse_host_and_port(rest, args, 1883);
     } else if let Some(rest) = raw.strip_prefix("tcp://") {
         parse_host_and_port(rest, args, 1883);
+    } else {
+        parse_host_and_port(&raw, args, 1883);
     }
 }
 
 fn parse_host_and_port(input: &str, args: &mut Args, default_port: u16) {
-    if let Some((host, port_str)) = input.rsplit_once(':') {
-        args.broker = host.to_string();
-        if let Ok(p) = port_str.parse::<u16>() {
+    if input.starts_with('[') {
+        if let Some((bracketed, port_str)) = input.rsplit_once(':')
+            && bracketed.ends_with(']')
+            && let Ok(p) = port_str.parse::<u16>()
+        {
+            args.broker = bracketed.trim_matches(|c| c == '[' || c == ']').to_string();
             args.port = p;
+            return;
+        }
+        args.broker = input.trim_matches(|c| c == '[' || c == ']').to_string();
+        if args.port == 1883 && default_port != 1883 {
+            args.port = default_port;
+        }
+    } else if let Some((host, port_str)) = input.rsplit_once(':') {
+        if !host.contains(':')
+            && let Ok(p) = port_str.parse::<u16>()
+        {
+            args.broker = host.to_string();
+            args.port = p;
+            return;
+        }
+        args.broker = input.to_string();
+        if args.port == 1883 && default_port != 1883 {
+            args.port = default_port;
         }
     } else {
         args.broker = input.to_string();
@@ -461,6 +483,16 @@ mod tests {
         normalize_broker_target(&mut args4);
         assert_eq!(args4.broker, "plain-host");
         assert_eq!(args4.port, 1885);
+
+        let mut args5 = Args::parse_from(["mqtt-sniper", "-b", "localhost:1883"]);
+        normalize_broker_target(&mut args5);
+        assert_eq!(args5.broker, "localhost");
+        assert_eq!(args5.port, 1883);
+
+        let mut args6 = Args::parse_from(["mqtt-sniper", "-b", "[::1]:1883"]);
+        normalize_broker_target(&mut args6);
+        assert_eq!(args6.broker, "::1");
+        assert_eq!(args6.port, 1883);
     }
 
     #[test]

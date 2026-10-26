@@ -443,7 +443,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       mosquitto:
-        image: eclipse-mosquitto:2
+        image: eclipse-mosquitto:1.6
         ports:
           - 1883:1883
 

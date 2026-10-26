@@ -78,7 +78,9 @@ runs:
         elif [ -f "${{ github.action_path }}/target/release/mqtt-sniper" ]; then
           EXEC_CMD="${{ github.action_path }}/target/release/mqtt-sniper"
         else
-          EXEC_CMD="docker run --rm --network host -v $PWD:/work -w /work ghcr.io/thitipongroo/mqtt-sniper:latest"
+          touch "$OUTPUT_FILE" 2>/dev/null || true
+          chmod 666 "$OUTPUT_FILE" 2>/dev/null || true
+          EXEC_CMD="docker run --rm --network host --user $(id -u):$(id -g) -v $PWD:/work -w /work ghcr.io/thitipongroo/mqtt-sniper:latest"
         fi
 
         echo "🚀 Running MQTT Sniper SLA Gate:"
