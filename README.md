@@ -419,55 +419,76 @@ Spawning 500 concurrent Pub clients (200 msgs/client, QoS 1)...
 
 ## 🤖 CI/CD Quality Gate (GitHub Actions)
 
-Integrate MQTT Sniper directly into your pull requests and release pipelines to prevent throughput regressions and latency breaches before deploying to production.
+Integrate MQTT Sniper directly into your pull requests and release pipelines to enforce latency SLAs and prevent throughput regressions before deploying brokers to production.
 
-### Reusable Composite Action (`action.yml`)
+A ready-to-use sample workflow is provided at [`.github/workflows/ci-sla-gate.yml`](.github/workflows/ci-sla-gate.yml).
 
-Add the composite action directly into your GitHub Actions workflow:
+### GitHub Action Integration (`thitipongroo/mqtt-sniper@v1.1.0`)
+
+You can reference `thitipongroo/mqtt-sniper@v1.1.0` in your workflow:
 
 ```yaml
-name: MQTT Broker SLA Verification
+name: 'Pulse Sniper Broker SLA Gate'
 
-on: [push, pull_request]
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
 
 jobs:
-  sla-test:
-    name: Broker Benchmark & Quality Gate
+  mqtt-sla-benchmark:
+    name: 'MQTT Performance & Latency SLA Gate'
     runs-on: ubuntu-latest
     services:
       mosquitto:
-        image: eclipse-mosquitto:1.6
+        image: eclipse-mosquitto:2
         ports:
           - 1883:1883
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
-      # Execute MQTT Sniper SLA Assertion
-      - name: Run MQTT Sniper SLA Check
-        id: sniper
-        uses: thitipongroo/mqtt-sniper@main
+      - name: Run Single-Node MQTT Sniper SLA Check
+        uses: thitipongroo/mqtt-sniper@v1.1.0
         with:
-          broker-url: 'mqtt://localhost:1883'
-          clients: 100
-          count: 50
-          max-p95-ms: 30.0
-          min-success-rate: 99.5
+          broker-url: 'localhost:1883'
+          clients: '100'
+          count: '20'
+          max-p95-ms: '50'
+          min-success-rate: '99.9'
           output-format: 'json'
-          output-file: 'sla-report.json'
-
-      - name: Check Gate Status
-        run: |
-          echo "Status: ${{ steps.sniper.outputs.status }}"
-          echo "Report: ${{ steps.sniper.outputs.report-json }}"
+          output-file: 'benchmark-report.json'
 
       - name: Archive Benchmark Report
-        if: always()
         uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: mqtt-sla-report
-          path: sla-report.json
+          name: mqtt-sniper-benchmark-report
+          path: benchmark-report.json
 ```
+
+### Action Configuration Inputs
+
+| Input | Required | Default | Description |
+| :--- | :---: | :---: | :--- |
+| `broker-url` | **Yes** | — | Target MQTT broker host or URL (e.g. `localhost:1883`, `mqtt://127.0.0.1:1883`). |
+| `clients` | No | `100` | Number of concurrent simulated IoT clients. |
+| `count` | No | `10` | Number of messages published or received per client. |
+| `max-p95-ms` | No | `""` | **SLA Assertion**: Maximum allowable p95 latency threshold in ms (fails job if exceeded). |
+| `min-success-rate` | No | `""` | **SLA Assertion**: Minimum required delivery rate (e.g. `99.9` for 99.9% or `0.999`). |
+| `duration` | No | `0` | Soak test duration in seconds (`0` uses message `count`). |
+| `output-format` | No | `json` | Report output format: `json`, `text`, or `prometheus`. |
+| `output-file` | No | `mqtt-sniper-report.json` | Destination file path for benchmark telemetry report. |
+
+#### Action Outputs
+
+| Output | Description |
+| :--- | :--- |
+| `report-json` | File path of generated JSON/Prometheus benchmark metrics. |
+| `status` | SLA quality gate evaluation status (`Pass` or `Fail`). |
 
 ---
 
@@ -489,6 +510,12 @@ If your organization relies on `mqtt-sniper` for IoT benchmarking or CI/CD SLA v
 - 🥇 **Gold / Enterprise Sponsor ($1,000/mo):** Hero logo placement, custom feature prioritization, and monthly architecture review.
 
 👉 **[Become a Sponsor on GitHub](https://github.com/sponsors/thitipongroo)**
+
+---
+
+### ⚡ Need 1M - 10M Concurrent Sockets or an Independent Broker Audit?
+For enterprise-grade distributed mesh testing across multiple cloud regions or pre-launch broker certification:
+👉 **[Explore Testing-as-a-Service (TaaS) & Enterprise Mesh](https://pulseiot-cloud.com/#taas)**
 
 ---
 

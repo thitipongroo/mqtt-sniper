@@ -1,0 +1,40 @@
+name: 'Pulse Sniper Broker SLA Gate'
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  mqtt-sla-benchmark:
+    name: 'MQTT Performance & Latency SLA Gate'
+    runs-on: ubuntu-latest
+    services:
+      mosquitto:
+        image: eclipse-mosquitto:2
+        ports:
+          - 1883:1883
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Run Single-Node MQTT Sniper SLA Check
+        uses: ./
+        with:
+          broker-url: 'localhost:1883'
+          clients: '100'
+          count: '20'
+          max-p95-ms: '50'
+          min-success-rate: '99.9'
+          output-format: 'json'
+          output-file: 'benchmark-report.json'
+
+      - name: Archive Benchmark Report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mqtt-sniper-benchmark-report
+          path: benchmark-report.json
