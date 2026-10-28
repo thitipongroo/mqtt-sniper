@@ -2,9 +2,9 @@ use crate::cli::{
     Args, Mode, OutputFormat, build_transport, check_file_descriptor_limits,
     normalize_broker_target, parse_qos, resolve_payload_template,
 };
+use crate::metrics::ShardedHistogramPool;
 use crate::payload::build_payload_with_chaos;
 use crate::report::BenchmarkReport;
-use hdrhistogram::Histogram;
 use indicatif::{ProgressBar, ProgressStyle};
 use rumqttc::{AsyncClient, Event, MqttOptions, Outgoing, Packet, QoS, Transport};
 use std::collections::HashMap;
@@ -38,6 +38,7 @@ struct ClientSpawnContext {
     published_counter: Arc<AtomicUsize>,
     malformed_counter: Arc<AtomicUsize>,
     failed_counter: Arc<AtomicUsize>,
+    hist_pool: Arc<ShardedHistogramPool>,
     pb_clone: ProgressBar,
     sem_clone: Option<Arc<Semaphore>>,
     worker_shutdown: watch::Receiver<bool>,
@@ -72,7 +73,7 @@ fn extract_payload_latency_us(payload: &[u8], fallback_start: Instant) -> u64 {
     fallback_start.elapsed().as_micros().max(1) as u64
 }
 
-async fn run_client_v3(ctx: ClientSpawnContext) -> Histogram<u64> {
+async fn run_client_v3(ctx: ClientSpawnContext) {
     let ClientSpawnContext {
         device_id,
         client_id,
@@ -96,6 +97,7 @@ async fn run_client_v3(ctx: ClientSpawnContext) -> Histogram<u64> {
         published_counter,
         malformed_counter,
         failed_counter,
+        hist_pool,
         pb_clone,
         sem_clone,
         mut worker_shutdown,
@@ -226,8 +228,6 @@ async fn run_client_v3(ctx: ClientSpawnContext) -> Histogram<u64> {
 
     let mut completed_count = 0usize;
     let mut inflight: HashMap<u16, Instant> = HashMap::new();
-    let mut client_hist = Histogram::<u64>::new_with_bounds(1, 60_000_000, 3)
-        .expect("Failed to create client histogram");
     let mut last_recv = Instant::now();
 
     loop {
@@ -241,7 +241,7 @@ async fn run_client_v3(ctx: ClientSpawnContext) -> Histogram<u64> {
                 match poll_res {
                     Ok(Event::Incoming(Packet::ConnAck(_))) if mode == Mode::Conn => {
                         let lat_us = (connect_start.elapsed().as_micros() as u64).clamp(1, 60_000_000);
-                        let _ = client_hist.record(lat_us);
+                        hist_pool.record(device_id, lat_us);
                         published_counter.fetch_add(1, Ordering::Relaxed);
                         pb_clone.inc(1);
                         if duration_secs == 0 {
@@ -252,7 +252,7 @@ async fn run_client_v3(ctx: ClientSpawnContext) -> Histogram<u64> {
                         if qos == QoS::AtMostOnce {
                             if let Ok(t0) = rx_time.try_recv() {
                                 let lat_us = (t0.elapsed().as_micros() as u64).clamp(1, 60_000_000);
-                                let _ = client_hist.record(lat_us);
+                                hist_pool.record(device_id, lat_us);
                             }
                             published_counter.fetch_add(1, Ordering::Relaxed);
                             pb_clone.inc(1);
@@ -264,7 +264,7 @@ async fn run_client_v3(ctx: ClientSpawnContext) -> Histogram<u64> {
                         if qos == QoS::AtLeastOnce {
                             if let Some(t0) = inflight.remove(&ack.pkid) {
                                 let lat_us = (t0.elapsed().as_micros() as u64).clamp(1, 60_000_000);
-                                let _ = client_hist.record(lat_us);
+                                hist_pool.record(device_id, lat_us);
                             }
                             published_counter.fetch_add(1, Ordering::Relaxed);
                             pb_clone.inc(1);
@@ -278,7 +278,7 @@ async fn run_client_v3(ctx: ClientSpawnContext) -> Histogram<u64> {
                         if qos == QoS::ExactlyOnce {
                             if let Some(t0) = inflight.remove(&comp.pkid) {
                                 let lat_us = (t0.elapsed().as_micros() as u64).clamp(1, 60_000_000);
-                                let _ = client_hist.record(lat_us);
+                                hist_pool.record(device_id, lat_us);
                             }
                             published_counter.fetch_add(1, Ordering::Relaxed);
                             pb_clone.inc(1);
@@ -292,7 +292,7 @@ async fn run_client_v3(ctx: ClientSpawnContext) -> Histogram<u64> {
                         let lat_us = extract_payload_latency_us(&publish.payload, last_recv)
                             .clamp(1, 60_000_000);
                         last_recv = Instant::now();
-                        let _ = client_hist.record(lat_us);
+                        hist_pool.record(device_id, lat_us);
                         published_counter.fetch_add(1, Ordering::Relaxed);
                         pb_clone.inc(1);
                         completed_count += 1;
@@ -315,10 +315,9 @@ async fn run_client_v3(ctx: ClientSpawnContext) -> Histogram<u64> {
 
     worker.abort();
     let _ = worker.await;
-    client_hist
 }
 
-async fn run_client_v5(ctx: ClientSpawnContext) -> Histogram<u64> {
+async fn run_client_v5(ctx: ClientSpawnContext) {
     use rumqttc::v5::mqttbytes::QoS as QoS5;
     use rumqttc::v5::mqttbytes::v5::Packet as Packet5;
     use rumqttc::v5::{AsyncClient as AsyncClient5, Event as Event5, MqttOptions as MqttOptions5};
@@ -346,6 +345,7 @@ async fn run_client_v5(ctx: ClientSpawnContext) -> Histogram<u64> {
         published_counter,
         malformed_counter,
         failed_counter,
+        hist_pool,
         pb_clone,
         sem_clone,
         mut worker_shutdown,
@@ -482,8 +482,6 @@ async fn run_client_v5(ctx: ClientSpawnContext) -> Histogram<u64> {
 
     let mut completed_count = 0usize;
     let mut inflight: HashMap<u16, Instant> = HashMap::new();
-    let mut client_hist = Histogram::<u64>::new_with_bounds(1, 60_000_000, 3)
-        .expect("Failed to create client histogram");
     let mut last_recv = Instant::now();
 
     loop {
@@ -497,7 +495,7 @@ async fn run_client_v5(ctx: ClientSpawnContext) -> Histogram<u64> {
                 match poll_res {
                     Ok(Event5::Incoming(Packet5::ConnAck(_))) if mode == Mode::Conn => {
                         let lat_us = (connect_start.elapsed().as_micros() as u64).clamp(1, 60_000_000);
-                        let _ = client_hist.record(lat_us);
+                        hist_pool.record(device_id, lat_us);
                         published_counter.fetch_add(1, Ordering::Relaxed);
                         pb_clone.inc(1);
                         if duration_secs == 0 {
@@ -508,7 +506,7 @@ async fn run_client_v5(ctx: ClientSpawnContext) -> Histogram<u64> {
                         if qos == QoS5::AtMostOnce {
                             if let Ok(t0) = rx_time.try_recv() {
                                 let lat_us = (t0.elapsed().as_micros() as u64).clamp(1, 60_000_000);
-                                let _ = client_hist.record(lat_us);
+                                hist_pool.record(device_id, lat_us);
                             }
                             published_counter.fetch_add(1, Ordering::Relaxed);
                             pb_clone.inc(1);
@@ -520,7 +518,7 @@ async fn run_client_v5(ctx: ClientSpawnContext) -> Histogram<u64> {
                         if qos == QoS5::AtLeastOnce {
                             if let Some(t0) = inflight.remove(&ack.pkid) {
                                 let lat_us = (t0.elapsed().as_micros() as u64).clamp(1, 60_000_000);
-                                let _ = client_hist.record(lat_us);
+                                hist_pool.record(device_id, lat_us);
                             }
                             published_counter.fetch_add(1, Ordering::Relaxed);
                             pb_clone.inc(1);
@@ -534,7 +532,7 @@ async fn run_client_v5(ctx: ClientSpawnContext) -> Histogram<u64> {
                         if qos == QoS5::ExactlyOnce {
                             if let Some(t0) = inflight.remove(&comp.pkid) {
                                 let lat_us = (t0.elapsed().as_micros() as u64).clamp(1, 60_000_000);
-                                let _ = client_hist.record(lat_us);
+                                hist_pool.record(device_id, lat_us);
                             }
                             published_counter.fetch_add(1, Ordering::Relaxed);
                             pb_clone.inc(1);
@@ -548,7 +546,7 @@ async fn run_client_v5(ctx: ClientSpawnContext) -> Histogram<u64> {
                         let lat_us = extract_payload_latency_us(&publish.payload, last_recv)
                             .clamp(1, 60_000_000);
                         last_recv = Instant::now();
-                        let _ = client_hist.record(lat_us);
+                        hist_pool.record(device_id, lat_us);
                         published_counter.fetch_add(1, Ordering::Relaxed);
                         pb_clone.inc(1);
                         completed_count += 1;
@@ -571,7 +569,6 @@ async fn run_client_v5(ctx: ClientSpawnContext) -> Histogram<u64> {
 
     worker.abort();
     let _ = worker.await;
-    client_hist
 }
 
 pub async fn run_load_test(mut args: Args) -> BenchmarkReport {
@@ -669,6 +666,9 @@ pub async fn run_load_test(mut args: Args) -> BenchmarkReport {
     let malformed_count = Arc::new(AtomicUsize::new(0));
     let failed_clients = Arc::new(AtomicUsize::new(0));
 
+    // Core-partitioned sharded histogram pool: eliminates per-client ~40 KB memory allocations
+    let hist_pool = Arc::new(ShardedHistogramPool::default());
+
     // Concurrency bounded semaphore: bounds active simultaneous sockets to safe limit
     let semaphore = if args.max_connections > 0 {
         let capped = args.max_connections.min(fd_check.safe_limit);
@@ -724,6 +724,7 @@ pub async fn run_load_test(mut args: Args) -> BenchmarkReport {
             published_counter: Arc::clone(&published_count),
             malformed_counter: Arc::clone(&malformed_count),
             failed_counter: Arc::clone(&failed_clients),
+            hist_pool: Arc::clone(&hist_pool),
             pb_clone: pb.clone(),
             sem_clone: semaphore.clone(),
             worker_shutdown: shutdown_rx.clone(),
@@ -732,23 +733,21 @@ pub async fn run_load_test(mut args: Args) -> BenchmarkReport {
 
         let handle = task::spawn(async move {
             if mqtt_version == 5 {
-                run_client_v5(ctx).await
+                run_client_v5(ctx).await;
             } else {
-                run_client_v3(ctx).await
+                run_client_v3(ctx).await;
             }
         });
 
         handles.push(handle);
     }
 
-    let mut hist =
-        Histogram::<u64>::new_with_bounds(1, 60_000_000, 3).expect("Failed to create histogram");
-
     for handle in handles {
-        if let Ok(client_hist) = handle.await {
-            let _ = hist.add(&client_hist);
-        }
+        let _ = handle.await;
     }
+
+    // Merge only the small, fixed number of core-partitioned shards (< 1 ms vs ~3.2s for 100k merges)
+    let hist = hist_pool.merge_all();
 
     signal_handle.abort();
     pb.finish_and_clear();
@@ -853,5 +852,17 @@ mod tests {
         let args = Args::parse_from(["mqtt-sniper", "-c", "100000"]);
         let fd_check = check_file_descriptor_limits(args.clients, args.max_connections);
         assert!(fd_check.safe_limit > 0);
+    }
+
+    #[test]
+    fn test_sharded_histogram_pool_integration() {
+        let pool = ShardedHistogramPool::default();
+        for i in 0..10_000 {
+            pool.record(i, ((i % 1000) + 1) as u64);
+        }
+        let merged = pool.merge_all();
+        assert_eq!(merged.len(), 10_000);
+        assert_eq!(merged.min(), 1);
+        assert_eq!(merged.max(), 1000);
     }
 }
