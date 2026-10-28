@@ -61,7 +61,7 @@ pub struct Args {
     #[arg(long, default_value = "sniper-client-")]
     pub client_prefix: String,
 
-    /// Maximum number of active concurrent connections (0 = unlimited)
+    /// Maximum number of active concurrent connections (0 = unlimited / auto-bounded by OS limit)
     #[arg(long, default_value_t = 0)]
     pub max_connections: usize,
 
@@ -300,6 +300,157 @@ pub fn build_transport(args: &Args) -> Result<Transport, String> {
     }
 }
 
+/// Reserved file descriptors for stdio, epoll, log files, and runtime overhead
+pub const FD_SAFETY_MARGIN: u64 = 64;
+
+/// Result of checking OS file descriptor limits against requested benchmark concurrency
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FdLimitCheck {
+    pub soft_limit: u64,
+    pub hard_limit: u64,
+    pub safe_limit: usize,
+    pub target_connections: usize,
+    pub is_exceeded: bool,
+    pub warning: Option<String>,
+}
+
+/// Query OS file descriptor limits (soft_limit, hard_limit)
+#[cfg(unix)]
+pub fn get_os_fd_limits() -> (u64, u64) {
+    let mut rlim = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    let ret = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut rlim) };
+    if ret == 0 {
+        let cur = if rlim.rlim_cur == libc::RLIM_INFINITY {
+            u64::MAX
+        } else {
+            rlim.rlim_cur as u64
+        };
+        let max = if rlim.rlim_max == libc::RLIM_INFINITY {
+            u64::MAX
+        } else {
+            rlim.rlim_max as u64
+        };
+        (cur, max)
+    } else {
+        (1024, 4096)
+    }
+}
+
+/// Attempt to raise the soft file descriptor limit up to hard limit on Unix
+#[cfg(unix)]
+pub fn try_raise_fd_limit(desired: u64) -> u64 {
+    let mut rlim = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    let ret = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut rlim) };
+    if ret != 0 {
+        return 1024;
+    }
+    let current_soft = if rlim.rlim_cur == libc::RLIM_INFINITY {
+        u64::MAX
+    } else {
+        rlim.rlim_cur as u64
+    };
+    let hard = if rlim.rlim_max == libc::RLIM_INFINITY {
+        u64::MAX
+    } else {
+        rlim.rlim_max as u64
+    };
+
+    if desired > current_soft && hard > current_soft {
+        let target_soft = desired.min(hard);
+        let mut new_rlim = rlim;
+        new_rlim.rlim_cur = if target_soft == u64::MAX {
+            libc::RLIM_INFINITY
+        } else {
+            target_soft as libc::rlim_t
+        };
+        if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &new_rlim) } == 0 {
+            return target_soft;
+        }
+    }
+    current_soft
+}
+
+/// Query OS file descriptor / socket limits on non-unix platforms (Windows fallback)
+#[cfg(not(unix))]
+pub fn get_os_fd_limits() -> (u64, u64) {
+    (16_384, 65_535)
+}
+
+/// Attempt to raise limit on non-unix platforms (no-op clamp)
+#[cfg(not(unix))]
+pub fn try_raise_fd_limit(desired: u64) -> u64 {
+    let (soft, hard) = get_os_fd_limits();
+    desired.min(hard).max(soft)
+}
+
+/// Deterministically evaluate file descriptor safety against given limits
+pub fn evaluate_fd_limits(
+    clients: usize,
+    max_connections: usize,
+    soft_limit: u64,
+    hard_limit: u64,
+) -> FdLimitCheck {
+    let target = if max_connections > 0 {
+        max_connections.min(clients)
+    } else {
+        clients
+    };
+
+    let safe_limit = soft_limit
+        .saturating_sub(FD_SAFETY_MARGIN)
+        .max(1) as usize;
+
+    let is_exceeded = (target as u64) > soft_limit.saturating_sub(FD_SAFETY_MARGIN);
+
+    let warning = if is_exceeded {
+        let required = (target as u64).saturating_add(FD_SAFETY_MARGIN);
+        let recommended = required.max(65_535);
+        Some(format!(
+            "⚠️  File Descriptor Warning: Requested concurrency ({target}) exceeds OS file descriptor safe limit ({safe_limit} connections; OS soft={soft_limit}, hard={hard_limit}).\n\
+             ⚠️  Risk: Potential 'Too many open files' (EMFILE / OS error 24) process crash.\n\
+             💡 Recommendation: Increase OS file descriptor limit before running:\n\
+                * Temporary: Run `ulimit -n {recommended}` in your shell\n\
+                * Permanent: Add `* soft nofile {recommended}` and `* hard nofile {recommended}` to /etc/security/limits.conf\n\
+             🛡️  Safeguard: Concurrency will be bounded by semaphore to {safe_limit} active connections."
+        ))
+    } else {
+        None
+    };
+
+    FdLimitCheck {
+        soft_limit,
+        hard_limit,
+        safe_limit,
+        target_connections: target,
+        is_exceeded,
+        warning,
+    }
+}
+
+/// Pre-flight check examining OS soft/hard file descriptor limits and returning safety bounds
+pub fn check_file_descriptor_limits(clients: usize, max_connections: usize) -> FdLimitCheck {
+    let target = if max_connections > 0 {
+        max_connections.min(clients)
+    } else {
+        clients
+    };
+
+    let (mut soft, hard) = get_os_fd_limits();
+    let required = (target as u64).saturating_add(FD_SAFETY_MARGIN);
+
+    if required > soft && hard > soft {
+        soft = try_raise_fd_limit(required);
+    }
+
+    evaluate_fd_limits(clients, max_connections, soft, hard)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -532,5 +683,43 @@ mod tests {
 
         args.cert = Some("cert.pem".to_string());
         assert!(build_transport(&args).is_err());
+    }
+
+    #[test]
+    fn test_fd_limits_safe_range() {
+        let check = evaluate_fd_limits(100, 0, 1024, 4096);
+        assert_eq!(check.target_connections, 100);
+        assert_eq!(check.safe_limit, 960);
+        assert!(!check.is_exceeded);
+        assert!(check.warning.is_none());
+    }
+
+    #[test]
+    fn test_fd_limits_exceeded_triggers_warning_and_safe_bound() {
+        let check = evaluate_fd_limits(100_000, 0, 1024, 4096);
+        assert_eq!(check.target_connections, 100_000);
+        assert_eq!(check.safe_limit, 960);
+        assert!(check.is_exceeded);
+        let warn = check.warning.expect("Warning must be generated");
+        assert!(warn.contains("ulimit -n"));
+        assert!(warn.contains("Too many open files"));
+        assert!(warn.contains("bounded by semaphore to 960"));
+    }
+
+    #[test]
+    fn test_fd_limits_user_max_connections_respected() {
+        let check = evaluate_fd_limits(100_000, 500, 1024, 4096);
+        assert_eq!(check.target_connections, 500);
+        assert_eq!(check.safe_limit, 960);
+        assert!(!check.is_exceeded);
+        assert!(check.warning.is_none());
+    }
+
+    #[test]
+    fn test_check_file_descriptor_limits_live() {
+        let check = check_file_descriptor_limits(50, 0);
+        assert_eq!(check.target_connections, 50);
+        assert!(check.safe_limit > 0);
+        assert!(!check.is_exceeded);
     }
 }

@@ -335,10 +335,7 @@ impl BenchmarkReport {
         }
 
         println!("\n┌────────────────────────────────────────────────────────────────────────┐");
-        println!("│ 🎯 Pulse Sniper: Enterprise Stress Testing & Broker Audit (TaaS)       │");
-        println!("│    Need 1M - 10M Distributed Sockets or CI/CD Performance SLA Gates?    │");
-        println!("│    ⚡ Book an Independent Broker Audit & SLA Benchmark ($3,000 - $8,000):│");
-        println!("│       👉 https://pulseiot-cloud.com/#taas                              │");
+        println!("│ 🎯 MQTT Sniper: Open Source MQTT Load Testing & Benchmarking CLI       │");
         println!("│    ⭐ Star on GitHub: https://github.com/thitipongroo/mqtt-sniper     │");
         println!("└────────────────────────────────────────────────────────────────────────┘");
     }

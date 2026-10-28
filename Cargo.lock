@@ -405,6 +405,7 @@ dependencies = [
  "clap",
  "hdrhistogram",
  "indicatif",
+ "libc",
  "rumqttc",
  "serde",
  "serde_json",

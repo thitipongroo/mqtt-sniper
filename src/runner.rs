@@ -1,6 +1,6 @@
 use crate::cli::{
-    Args, Mode, OutputFormat, build_transport, normalize_broker_target, parse_qos,
-    resolve_payload_template,
+    Args, Mode, OutputFormat, build_transport, check_file_descriptor_limits,
+    normalize_broker_target, parse_qos, resolve_payload_template,
 };
 use crate::payload::build_payload_with_chaos;
 use crate::report::BenchmarkReport;
@@ -10,9 +10,10 @@ use rumqttc::{AsyncClient, Event, MqttOptions, Outgoing, Packet, QoS, Transport}
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Semaphore, mpsc, watch};
 use tokio::task;
+use tokio::time::Instant;
 
 struct ClientSpawnContext {
     device_id: usize,
@@ -68,7 +69,7 @@ fn extract_payload_latency_us(payload: &[u8], fallback_start: Instant) -> u64 {
             return (now_us - ts_us).max(1);
         }
     }
-    fallback_start.elapsed().as_micros() as u64
+    fallback_start.elapsed().as_micros().max(1) as u64
 }
 
 async fn run_client_v3(ctx: ClientSpawnContext) -> Histogram<u64> {
@@ -599,6 +600,15 @@ pub async fn run_load_test(mut args: Args) -> BenchmarkReport {
         "v3.1.1"
     };
 
+    // Pre-flight check for OS file descriptor / socket limits against requested concurrency
+    let fd_check = check_file_descriptor_limits(args.clients, args.max_connections);
+    if !args.quiet
+        && fd_check.is_exceeded
+        && let Some(ref warn) = fd_check.warning
+    {
+        eprintln!("{}\n", warn);
+    }
+
     let is_quiet = args.quiet || args.output != OutputFormat::Text;
 
     if !is_quiet {
@@ -658,8 +668,13 @@ pub async fn run_load_test(mut args: Args) -> BenchmarkReport {
     let published_count = Arc::new(AtomicUsize::new(0));
     let malformed_count = Arc::new(AtomicUsize::new(0));
     let failed_clients = Arc::new(AtomicUsize::new(0));
+
+    // Concurrency bounded semaphore: bounds active simultaneous sockets to safe limit
     let semaphore = if args.max_connections > 0 {
-        Some(Arc::new(Semaphore::new(args.max_connections)))
+        let capped = args.max_connections.min(fd_check.safe_limit);
+        Some(Arc::new(Semaphore::new(capped)))
+    } else if fd_check.is_exceeded {
+        Some(Arc::new(Semaphore::new(fd_check.safe_limit)))
     } else {
         None
     };
@@ -802,10 +817,11 @@ pub async fn run_load_test(mut args: Args) -> BenchmarkReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
 
     #[test]
     fn test_extract_payload_latency_supports_ts_timestamp_and_units() {
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
         let now_ms = now.as_millis() as u64;
         let now_secs = now.as_secs();
         let fallback = Instant::now();
@@ -821,5 +837,21 @@ mod tests {
         let payload_secs = format!(r#"{{"timestamp": {}}}"#, now_secs.saturating_sub(1));
         let lat_secs = extract_payload_latency_us(payload_secs.as_bytes(), fallback);
         assert!(lat_secs >= 500_000);
+    }
+
+    #[test]
+    fn test_extract_payload_latency_ntp_backward_step_resilience() {
+        let fallback = Instant::now();
+        // Payload timestamp far in the future simulating a backwards step of the local system clock
+        let future_payload = r#"{"ts": 9999999999999999}"#;
+        let lat = extract_payload_latency_us(future_payload.as_bytes(), fallback);
+        assert!(lat >= 1);
+    }
+
+    #[test]
+    fn test_file_descriptor_safeguard_bounds_semaphore() {
+        let args = Args::parse_from(["mqtt-sniper", "-c", "100000"]);
+        let fd_check = check_file_descriptor_limits(args.clients, args.max_connections);
+        assert!(fd_check.safe_limit > 0);
     }
 }
