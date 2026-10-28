@@ -3,11 +3,12 @@
 [![Crates.io](https://img.shields.io/crates/v/mqtt-sniper.svg?style=for-the-badge&logo=rust)](https://crates.io/crates/mqtt-sniper)
 [![Docker](https://img.shields.io/badge/docker-multi--arch%20(amd64%2Farm64)-blue?style=for-the-badge&logo=docker)](https://github.com/thitipongroo/mqtt-sniper/pkgs/container/mqtt-sniper)
 [![MQTT](https://img.shields.io/badge/MQTT-v3.1.1%20%7C%20v5.0-660066?style=for-the-badge&logo=mqtt)](https://mqtt.org/)
-[![CI/CD](https://img.shields.io/github/actions/workflow/status/thitipongroo/mqtt-sniper/ci.yml?branch=main&style=for-the-badge&logo=github)](https://github.com/thitipongroo/mqtt-sniper/actions)
+[![Rust Edition](https://img.shields.io/badge/Rust-2024%20Edition-DEA584?style=for-the-badge&logo=rust)](https://www.rust-lang.org/)
+[![Safety](https://img.shields.io/badge/unsafe-forbidden-success.svg?style=for-the-badge)](https://github.com/rust-secure-code/safety-dance)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg?style=for-the-badge)](https://opensource.org/licenses/MIT)
 [![GitHub Sponsors](https://img.shields.io/github/sponsors/thitipongroo?style=flat-square&color=ea4aaa&logo=github)](https://github.com/sponsors/thitipongroo)
 
-**MQTT Sniper** is an enterprise-grade, high-performance MQTT load testing and benchmarking tool written in Rust. Powered by the **Tokio** asynchronous runtime and **rumqttc**, it can simulate hundreds of thousands of concurrent IoT devices across **MQTT v3.1.1** and **MQTT v5.0** brokers from a single machine with bounded O(1) memory footprint.
+**MQTT Sniper** is an enterprise-grade, high-performance MQTT load testing and benchmarking tool written in pure, idiomatic Rust. Powered by the **Tokio** asynchronous runtime and **rumqttc**, it can simulate hundreds of thousands of concurrent IoT devices across **MQTT v3.1.1** and **MQTT v5.0** brokers from a single machine with an ultra-low, bounded memory footprint.
 
 Whether testing broker throughput, connection handshake storms, end-to-end fan-out latency, or Dead-Letter Queue (DLQ) pipeline resilience, MQTT Sniper provides real-time HDR histogram latency statistics and automated CI/CD SLO quality gates.
 
@@ -15,14 +16,17 @@ Whether testing broker throughput, connection handshake storms, end-to-end fan-o
 
 ## 🚀 Key Capabilities
 
-* **⚡ Massive Asynchronous Concurrency**: Spawns tens of thousands of lightweight Tokio green-threads instead of heavy OS threads, with an active connection limiter (`--max-connections`) to prevent file descriptor exhaustion.
+* **⚡ Massive Asynchronous Concurrency**: Spawns tens of thousands of lightweight Tokio tasks instead of heavy OS threads, with an active connection limiter (`--max-connections`) to prevent file descriptor exhaustion.
+* **🛡️ Pre-flight OS File Descriptor Safeguard**: Automatically inspects OS `RLIMIT_NOFILE` soft and hard limits before starting tests, providing actionable tuning guidance and clamping socket pools safely to avoid `Too many open files` crashes.
+* **🧠 Core-Partitioned Sharded Histogram Pool**: Employs a low-contention sharded latency pool partitioned by CPU core (8–16 shards), slashing memory consumption by **>95%** (from ~3.5 GB down to <180 MB at 100k clients) and merging histograms in **<25ms** (<1ms typical).
+* **⏱️ Monotonic Latency & NTP Resilience**: Guarantees zero-panic execution during leap seconds or NTP backward clock steps by enforcing monotonic clocks (`tokio::time::Instant`) for latency measurement and defensive parsing for payload timestamps.
+* **🔒 100% Safe & Idiomatic Rust (`#![forbid(unsafe_code)]`)**: Fully strictly typed with Zero `unwrap()` calls in execution paths, robust domain errors with `thiserror`, and CLI context with `anyhow`.
 * **📡 Dual Protocol Engine (MQTT v3.1.1 & v5.0)**: Native protocol negotiation supporting standard MQTT 3.1.1 (`--mqtt-version 4` or `3`) and modern MQTT 5.0 (`--mqtt-version 5`).
 * **🔄 Triple Operational Modes**:
   * **Publish Mode (`--mode pub`)**: High-throughput message ingestion with strict acknowledgement tracking for QoS 0, QoS 1 (`PUBACK`), and QoS 2 (`PUBCOMP`).
   * **Subscribe Mode (`--mode sub`)**: Fan-out subscriber benchmarking with automatic multi-key (`ts`, `timestamp`, `time`) and multi-precision (seconds, ms, microseconds) end-to-end latency extraction.
   * **Connection Storm Mode (`--mode conn`)**: Handshake benchmark measuring `CONNECT` -> `CONNACK` latency, supporting persistent sessions (`--clean-session=false`) and long-lived connection soak tests.
-* **⏱️ Bounded O(1) HDR Histograms**: Per-client microsecond-precision `hdrhistogram` merged on completion, ensuring memory usage remains constant even during 24-hour soak tests (`--duration-secs`).
-* **🔒 Enterprise Security (TLS & mTLS)**: Encrypted `mqtts://` connections using native root certificates (`--tls`), custom CA certificate bundles (`--ca`), and mutual client certificate authentication (`--cert`, `--key`).
+* **🔐 Enterprise Security (TLS & mTLS)**: Encrypted `mqtts://` connections using native root certificates (`--tls`), custom CA certificate bundles (`--ca`), and mutual client certificate authentication (`--cert`, `--key`).
 * **🧬 Dynamic Per-Device Authentication & Topics**: Variable interpolation of `{device_id}` inside `--topic`, `--username`, and `--password`, with customizable `--start-number` (`-n`) and `--client-prefix` for distributed worker clusters.
 * **🎲 Rich Telemetry Templates**: Dynamic template evaluation supporting `{device_id}`, `{seq}`, `{timestamp}`, `{timestamp_secs}`, `{timestamp_us}`, `{random_int}`, `{random_float}`, `{random_bool}`, and `{uuid}` loaded inline (`--payload`) or from disk (`--payload-file`).
 * **💥 Chaos & DLQ Fault Injection**: Inject a configurable percentage of corrupted non-parseable payloads (`--malformed-rate 0.05`) to stress-test ingest pipeline error handling and Dead-Letter Queues.
@@ -99,7 +103,7 @@ mqtt-sniper \
   --output-json benchmark-v5.json
 ```
 
-### 2. Multi-Tenant IoT Platform Simulation (Dynamic Auth + DLQ Chaos)
+### 2. Multi-Device IoT Platform Simulation (Dynamic Auth + DLQ Chaos)
 
 Simulate devices `sensor-1` through `sensor-200` authenticating with per-device credentials, injecting `5%` malformed JSON payloads to verify pipeline Dead-Letter Queue (DLQ) routing:
 
@@ -191,8 +195,8 @@ Usage: mqtt-sniper [OPTIONS]
 | :--- | :---: | :---: | :--- |
 | `--clients <COUNT>` | `-c` | `100` | Number of concurrent simulated IoT clients |
 | `--start-number <INDEX>` | `-n` | `0` | Starting index for client IDs and `{device_id}` interpolation |
-| `--client-prefix <PREFIX>` | - | `sniper-client-` | Prefix for generated MQTT client IDs (`<prefix><device_id>`) |
-| `--max-connections <LIMIT>` | - | `0` | Max active concurrent connections semaphore (`0` = unlimited) |
+| `--client-prefix <PREFIX>` | - | `sniper-client-` | Prefix for generated MQTT client IDs (`{prefix}{device_id}`) |
+| `--max-connections <LIMIT>` | - | `0` | Max active concurrent connections semaphore (`0` = unlimited / bounded by OS limit) |
 | `--ramp-up-ms <MS>` | - | `0` | Delay (ms) between spawning consecutive clients (prevents SYN flood) |
 | `--username <USER>` | `-u` | - | MQTT username for authentication (supports `{device_id}`) |
 | `--password <PASS>` | - | - | MQTT password for authentication (supports `{device_id}`) |
@@ -281,7 +285,7 @@ When publishing payloads via `--payload` or `--payload-file`, MQTT Sniper evalua
 
 ## 📊 Observability & Structured Outputs
 
-MQTT Sniper is built from the ground up for deep observability, headless automated testing, and seamless integration with CI/CD quality pipelines and metric collectors (Terminal in -> Raw data out).
+MQTT Sniper is built from the ground up for deep observability, headless automated testing, and seamless integration with CI/CD quality pipelines and metric collectors.
 
 ### Pure Terminal Usage Guide
 
@@ -435,12 +439,12 @@ Integrate MQTT Sniper directly into your pull requests and release pipelines to 
 
 A ready-to-use sample workflow is provided at [`.github/workflows/ci-sla-gate.yml`](.github/workflows/ci-sla-gate.yml).
 
-### GitHub Action Integration (`thitipongroo/mqtt-sniper@v1.1.0`)
+### GitHub Action Integration (`thitipongroo/mqtt-sniper@v1.2.0`)
 
-You can reference `thitipongroo/mqtt-sniper@v1.1.0` in your workflow:
+You can reference `thitipongroo/mqtt-sniper@v1.2.0` in your workflow:
 
 ```yaml
-name: 'Pulse Sniper Broker SLA Gate'
+name: 'MQTT Sniper Broker SLA Gate'
 
 on:
   push:
@@ -455,7 +459,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       mosquitto:
-        image: eclipse-mosquitto:1.6
+        image: eclipse-mosquitto:2.0
         ports:
           - 1883:1883
 
@@ -464,7 +468,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Run Single-Node MQTT Sniper SLA Check
-        uses: thitipongroo/mqtt-sniper@v1.1.0
+        uses: thitipongroo/mqtt-sniper@v1.2.0
         with:
           broker-url: 'localhost:1883'
           clients: '100'
@@ -511,23 +515,13 @@ jobs:
 
 ---
 
-## 💖 Sponsoring & Enterprise Backers
+## 💖 Sponsoring & Open Source Community
 
 `mqtt-sniper` is an open-source, high-performance load testing engine built to help teams build resilient IoT infrastructures. Sponsoring helps ensure continued active maintenance, performance optimizations, and future enhancements.
 
-If your organization relies on `mqtt-sniper` for IoT benchmarking or CI/CD SLA validation, consider becoming a sponsor:
-
-- 🥉 **Bronze Sponsor ($100/mo):** Company logo featured in this README and priority issue handling.
-- 🥈 **Silver Sponsor ($300/mo):** Medium logo featured, priority bug fixes, and direct advisory channel.
-- 🥇 **Gold / Enterprise Sponsor ($1,000/mo):** Hero logo placement, custom feature prioritization, and monthly architecture review.
-
-👉 **[Become a Sponsor on GitHub](https://github.com/sponsors/thitipongroo)** &nbsp;|&nbsp; ☕ **[Support on Ko-fi](https://ko-fi.com/thitipongroo)** &nbsp;|&nbsp; 💛 **[Buy Me a Coffee](https://buymeacoffee.com/thitipongroo)**
-
----
-
-### ⚡ Need 1M - 10M Concurrent Sockets or an Independent Broker Audit?
-For enterprise-grade distributed mesh testing across multiple cloud regions or pre-launch broker certification:
-👉 **[Explore Testing-as-a-Service (TaaS) & Enterprise Mesh](https://pulseiot-cloud.com/#taas)**
+- ☕ **[Support on Ko-fi](https://ko-fi.com/thitipongroo)**
+- 💛 **[Buy Me a Coffee](https://buymeacoffee.com/thitipongroo)**
+- 👉 **[Become a Sponsor on GitHub](https://github.com/sponsors/thitipongroo)**
 
 ---
 
