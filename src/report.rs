@@ -4,6 +4,7 @@ use serde::Serialize;
 use std::fs;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+/// Format a `SystemTime` into an ISO-8601 UTC string (e.g. `2026-10-28T15:30:00Z`).
 pub fn format_iso8601(time: SystemTime) -> String {
     let dur = time.duration_since(UNIX_EPOCH).unwrap_or_default();
     let total_secs = dur.as_secs();
@@ -33,48 +34,76 @@ pub fn format_iso8601(time: SystemTime) -> String {
     )
 }
 
+/// Target specification in the benchmark report.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct TargetReport {
+    /// Broker endpoint URL (e.g. `mqtt://127.0.0.1:1883`)
     pub broker: String,
+    /// Number of simulated clients
     pub clients: usize,
+    /// QoS level tested
     pub qos: u8,
 }
 
+/// Aggregated throughput and message count metrics.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct MetricsReport {
+    /// Total expected messages in benchmark target
     pub total_messages: usize,
+    /// Successfully published or received messages
     pub success_count: usize,
+    /// Number of failed deliveries or disconnected clients
     pub failure_count: usize,
+    /// Success rate percentage (0.0 to 100.0)
     pub success_rate_percent: f64,
+    /// Benchmark wall clock duration in seconds
     pub duration_seconds: f64,
+    /// Effective throughput in messages per second
     pub throughput_msg_per_sec: f64,
 }
 
+/// Latency distribution percentiles in milliseconds.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct LatencyMsReport {
+    /// Minimum recorded latency
     pub min: f64,
+    /// 50th percentile (median) latency
     pub p50: f64,
+    /// 90th percentile latency
     pub p90: f64,
+    /// 95th percentile latency
     pub p95: f64,
+    /// 99th percentile latency
     pub p99: f64,
+    /// Maximum recorded latency
     pub max: f64,
 }
 
+/// Service Level Agreement (SLA) verification result.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct SlaReport {
+    /// Whether all configured SLA gates passed
     pub passed: bool,
+    /// Configured maximum p95 threshold in milliseconds, if set
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_p95_threshold_ms: Option<f64>,
+    /// Configured minimum success rate threshold percentage, if set
     #[serde(skip_serializing_if = "Option::is_none")]
     pub min_success_rate_threshold: Option<f64>,
 }
 
+/// Comprehensive benchmark report generated at the completion of a load test run.
 #[derive(Debug, Clone, Serialize)]
 pub struct BenchmarkReport {
+    /// ISO-8601 UTC timestamp of report generation
     pub timestamp: String,
+    /// Target broker details
     pub target: TargetReport,
+    /// Execution message metrics
     pub metrics: MetricsReport,
+    /// Latency breakdown across percentiles
     pub latency_ms: LatencyMsReport,
+    /// SLA pass/fail evaluation
     pub sla: SlaReport,
 
     // Flat fields retained for backward compatibility with runner.rs and tests
@@ -133,6 +162,7 @@ pub struct BenchmarkReport {
 }
 
 impl BenchmarkReport {
+    /// Construct a new `BenchmarkReport` from execution metrics and histogram.
     pub fn new(
         args: &Args,
         elapsed: Duration,
@@ -269,6 +299,7 @@ impl BenchmarkReport {
         }
     }
 
+    /// Print formatted human-readable summary table to stdout.
     pub fn print_summary(&self, elapsed: Duration) {
         let action_label = match self.mode {
             Mode::Pub => "messages sent",
@@ -340,10 +371,12 @@ impl BenchmarkReport {
         println!("└────────────────────────────────────────────────────────────────────────┘");
     }
 
+    /// Serialize benchmark report to a pretty JSON string.
     pub fn to_json_string(&self) -> String {
         serde_json::to_string_pretty(self).unwrap_or_else(|_| "{}".to_string())
     }
 
+    /// Export benchmark metrics into Prometheus / OpenMetrics text format.
     pub fn to_prometheus(&self) -> String {
         let mut out = String::new();
         out.push_str("# HELP mqtt_sniper_total_messages Total messages in benchmark target\n");
@@ -440,6 +473,7 @@ impl BenchmarkReport {
         out
     }
 
+    /// Save benchmark report as JSON to the specified filesystem path.
     pub fn save_json(&self, path: &str) {
         let json_str = self.to_json_string();
         if let Some(parent) = std::path::Path::new(path)
@@ -449,12 +483,13 @@ impl BenchmarkReport {
             let _ = fs::create_dir_all(parent);
         }
         if let Err(e) = fs::write(path, json_str) {
-            eprintln!("⚠️ Failed to write JSON report to {}: {}", path, e);
+            eprintln!("⚠️ Failed to write JSON report to {path}: {e}");
         } else {
-            eprintln!("💾 Saved JSON benchmark report to {}", path);
+            eprintln!("💾 Saved JSON benchmark report to {path}");
         }
     }
 
+    /// Save report text to the specified filesystem path.
     pub fn save_file(&self, path: &str, content: &str) {
         if let Some(parent) = std::path::Path::new(path)
             .parent()
@@ -463,9 +498,9 @@ impl BenchmarkReport {
             let _ = fs::create_dir_all(parent);
         }
         if let Err(e) = fs::write(path, content) {
-            eprintln!("⚠️ Failed to write report to {}: {}", path, e);
+            eprintln!("⚠️ Failed to write report to {path}: {e}");
         } else {
-            eprintln!("💾 Saved benchmark report to {}", path);
+            eprintln!("💾 Saved benchmark report to {path}");
         }
     }
 }
@@ -506,7 +541,8 @@ mod tests {
             "--min-success-rate",
             "0.99",
         ]);
-        let mut hist = Histogram::<u64>::new_with_bounds(1, 60_000_000, 3).unwrap();
+        let mut hist = Histogram::<u64>::new_with_bounds(1, 60_000_000, 3)
+            .expect("Valid bounds 1..60_000_000 must succeed");
         let _ = hist.record(10_000); // 10 ms
 
         let pass_report = BenchmarkReport::new(&args, Duration::from_secs(1), 100, 0, 0, &hist);
@@ -548,7 +584,8 @@ mod tests {
             "--min-success-rate",
             "0.95",
         ]);
-        let mut hist = Histogram::<u64>::new_with_bounds(1, 60_000_000, 3).unwrap();
+        let mut hist = Histogram::<u64>::new_with_bounds(1, 60_000_000, 3)
+            .expect("Valid bounds 1..60_000_000 must succeed");
         let _ = hist.record(5_000); // 5 ms
         let _ = hist.record(12_000); // 12 ms
 

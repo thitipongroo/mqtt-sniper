@@ -1,3 +1,4 @@
+use crate::error::{Result, SniperError};
 use clap::{Parser, ValueEnum};
 use rumqttc::{QoS, Transport};
 use serde::Serialize;
@@ -169,6 +170,7 @@ pub struct Args {
     pub output_json: Option<String>,
 }
 
+/// Parse and normalize broker URL or hostname, extracting host, port, and TLS scheme.
 pub fn normalize_broker_target(args: &mut Args) {
     let raw = args.broker.trim().to_string();
     if let Some(rest) = raw.strip_prefix("mqtts://") {
@@ -220,6 +222,7 @@ fn parse_host_and_port(input: &str, args: &mut Args, default_port: u16) {
     }
 }
 
+/// Convert integer QoS level (0, 1, 2) into `rumqttc::QoS`.
 pub fn parse_qos(qos: u8) -> QoS {
     match qos {
         0 => QoS::AtMostOnce,
@@ -232,42 +235,44 @@ pub fn parse_qos(qos: u8) -> QoS {
     }
 }
 
-pub fn resolve_payload_template(args: &Args) -> Result<String, String> {
+/// Resolve payload template from direct argument or template file, validating input constraints.
+pub fn resolve_payload_template(args: &Args) -> Result<String> {
     if !(0.0..=1.0).contains(&args.malformed_rate) {
-        return Err(format!(
+        return Err(SniperError::Payload(format!(
             "--malformed-rate must be between 0.0 and 1.0 (got {})",
             args.malformed_rate
-        ));
+        )));
     }
 
     if let Some(rate) = args.min_success_rate
         && !(0.0..=1.0).contains(&rate)
     {
-        return Err(format!(
+        return Err(SniperError::Payload(format!(
             "--min-success-rate must be between 0.0 and 1.0 (got {})",
             rate
-        ));
+        )));
     }
 
     if let Some(max_p95) = args.max_p95_ms
         && max_p95 < 0.0
     {
-        return Err(format!(
+        return Err(SniperError::Payload(format!(
             "--max-p95-ms must be non-negative (got {})",
             max_p95
-        ));
+        )));
     }
 
     if let Some(ref path) = args.payload_file {
         let content = fs::read_to_string(path)
-            .map_err(|e| format!("Failed to read payload file '{}': {}", path, e))?;
+            .map_err(|e| SniperError::Payload(format!("Failed to read payload file '{path}': {e}")))?;
         Ok(content.trim().to_string())
     } else {
         Ok(args.payload.clone())
     }
 }
 
-pub fn build_transport(args: &Args) -> Result<Transport, String> {
+/// Build `rumqttc::Transport` based on CLI TLS/mTLS parameters.
+pub fn build_transport(args: &Args) -> Result<Transport> {
     let use_tls = args.tls || args.ca.is_some() || args.cert.is_some() || args.key.is_some();
     if !use_tls {
         return Ok(Transport::Tcp);
@@ -276,25 +281,27 @@ pub fn build_transport(args: &Args) -> Result<Transport, String> {
     let client_auth = match (&args.cert, &args.key) {
         (Some(cert_path), Some(key_path)) => {
             let cert_bytes = fs::read(cert_path)
-                .map_err(|e| format!("Failed to read client cert '{}': {}", cert_path, e))?;
+                .map_err(|e| SniperError::Tls(format!("Failed to read client cert '{cert_path}': {e}")))?;
             let key_bytes = fs::read(key_path)
-                .map_err(|e| format!("Failed to read client key '{}': {}", key_path, e))?;
+                .map_err(|e| SniperError::Tls(format!("Failed to read client key '{key_path}': {e}")))?;
             Some((cert_bytes, key_bytes))
         }
         (Some(_), None) | (None, Some(_)) => {
-            return Err(
+            return Err(SniperError::Tls(
                 "Both --cert and --key must be provided for mTLS authentication".to_string(),
-            );
+            ));
         }
         (None, None) => None,
     };
 
     if let Some(ref ca_path) = args.ca {
         let ca_bytes = fs::read(ca_path)
-            .map_err(|e| format!("Failed to read CA cert '{}': {}", ca_path, e))?;
+            .map_err(|e| SniperError::Tls(format!("Failed to read CA cert '{ca_path}': {e}")))?;
         Ok(Transport::tls(ca_bytes, client_auth, None))
     } else if client_auth.is_some() {
-        Err("Custom --ca certificate is required when using --cert and --key for mTLS".to_string())
+        Err(SniperError::Tls(
+            "Custom --ca certificate is required when using --cert and --key for mTLS".to_string(),
+        ))
     } else {
         Ok(Transport::tls_with_default_config())
     }
@@ -306,74 +313,40 @@ pub const FD_SAFETY_MARGIN: u64 = 64;
 /// Result of checking OS file descriptor limits against requested benchmark concurrency
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FdLimitCheck {
+    /// Current OS soft file descriptor limit
     pub soft_limit: u64,
+    /// OS hard file descriptor ceiling
     pub hard_limit: u64,
+    /// Calculated safe concurrency limit (`soft_limit - FD_SAFETY_MARGIN`)
     pub safe_limit: usize,
+    /// Target concurrent socket connections
     pub target_connections: usize,
+    /// Whether target concurrency exceeds OS safe capacity
     pub is_exceeded: bool,
+    /// Actionable warning with recommended `ulimit -n` values
     pub warning: Option<String>,
 }
 
-/// Query OS file descriptor limits (soft_limit, hard_limit)
+/// Query OS file descriptor limits (soft_limit, hard_limit) safely without unsafe code
 #[cfg(unix)]
 pub fn get_os_fd_limits() -> (u64, u64) {
-    let mut rlim = libc::rlimit {
-        rlim_cur: 0,
-        rlim_max: 0,
-    };
-    let ret = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut rlim) };
-    if ret == 0 {
-        let cur = if rlim.rlim_cur == libc::RLIM_INFINITY {
-            u64::MAX
-        } else {
-            rlim.rlim_cur as u64
-        };
-        let max = if rlim.rlim_max == libc::RLIM_INFINITY {
-            u64::MAX
-        } else {
-            rlim.rlim_max as u64
-        };
-        (cur, max)
-    } else {
-        (1024, 4096)
+    match rlimit::Resource::NOFILE.get() {
+        Ok((soft, hard)) => (soft, hard),
+        Err(_) => (1024, 4096),
     }
 }
 
-/// Attempt to raise the soft file descriptor limit up to hard limit on Unix
+/// Attempt to raise the soft file descriptor limit up to hard limit on Unix safely
 #[cfg(unix)]
 pub fn try_raise_fd_limit(desired: u64) -> u64 {
-    let mut rlim = libc::rlimit {
-        rlim_cur: 0,
-        rlim_max: 0,
-    };
-    let ret = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut rlim) };
-    if ret != 0 {
-        return 1024;
-    }
-    let current_soft = if rlim.rlim_cur == libc::RLIM_INFINITY {
-        u64::MAX
-    } else {
-        rlim.rlim_cur as u64
-    };
-    let hard = if rlim.rlim_max == libc::RLIM_INFINITY {
-        u64::MAX
-    } else {
-        rlim.rlim_max as u64
-    };
-
-    if desired > current_soft && hard > current_soft {
-        let target_soft = desired.min(hard);
-        let mut new_rlim = rlim;
-        new_rlim.rlim_cur = if target_soft == u64::MAX {
-            libc::RLIM_INFINITY
-        } else {
-            target_soft as libc::rlim_t
-        };
-        if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &new_rlim) } == 0 {
-            return target_soft;
+    let (soft, hard) = get_os_fd_limits();
+    if desired > soft && hard > soft {
+        let target = desired.min(hard);
+        if rlimit::Resource::NOFILE.set(target, hard).is_ok() {
+            return target;
         }
     }
-    current_soft
+    soft
 }
 
 /// Query OS file descriptor / socket limits on non-unix platforms (Windows fallback)
@@ -606,7 +579,6 @@ mod tests {
         assert!(args.quiet);
         assert_eq!(args.output_json, Some("legacy-report.json".to_string()));
 
-        // Check --silent alias
         let silent_args = Args::parse_from(["mqtt-sniper", "--silent"]);
         assert!(silent_args.quiet);
     }
@@ -649,7 +621,10 @@ mod tests {
     #[test]
     fn test_resolve_payload_template_and_validation() {
         let mut args = Args::parse_from(["mqtt-sniper"]);
-        assert_eq!(resolve_payload_template(&args).unwrap(), args.payload);
+        assert_eq!(
+            resolve_payload_template(&args).expect("Default payload should be valid"),
+            args.payload
+        );
 
         args.malformed_rate = 1.5;
         assert!(resolve_payload_template(&args).is_err());
@@ -664,10 +639,16 @@ mod tests {
 
         args.max_p95_ms = Some(100.0);
         let tmp_file = std::env::temp_dir().join("mqtt_sniper_test_payload.json");
-        fs::write(&tmp_file, "  {\"deviceId\": \"sensor-{device_id}\"} \n").unwrap();
-        args.payload_file = Some(tmp_file.to_str().unwrap().to_string());
+        fs::write(&tmp_file, "  {\"deviceId\": \"sensor-{device_id}\"} \n")
+            .expect("Writing temporary test payload file must succeed");
+        args.payload_file = Some(
+            tmp_file
+                .to_str()
+                .expect("Temp file path must be valid UTF-8")
+                .to_string(),
+        );
         assert_eq!(
-            resolve_payload_template(&args).unwrap(),
+            resolve_payload_template(&args).expect("Custom file payload must resolve"),
             r#"{"deviceId": "sensor-{device_id}"}"#
         );
         let _ = fs::remove_file(&tmp_file);

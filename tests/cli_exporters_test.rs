@@ -75,11 +75,16 @@ async fn test_cli_output_json_and_output_file() {
     assert_eq!(file_json["metrics"]["success_count"], clients * messages);
     assert_eq!(file_json["metrics"]["failure_count"], 0);
     assert_eq!(file_json["metrics"]["success_rate_percent"], 100.0);
-    assert!(file_json["metrics"]["duration_seconds"].as_f64().unwrap() >= 0.0);
+    assert!(
+        file_json["metrics"]["duration_seconds"]
+            .as_f64()
+            .expect("duration_seconds as f64")
+            >= 0.0
+    );
     assert!(
         file_json["metrics"]["throughput_msg_per_sec"]
             .as_f64()
-            .unwrap()
+            .expect("throughput_msg_per_sec as f64")
             >= 0.0
     );
 

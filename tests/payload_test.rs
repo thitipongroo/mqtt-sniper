@@ -4,13 +4,13 @@ use mqtt_sniper::payload::{build_payload, build_payload_with_chaos};
 fn test_build_payload() {
     let template = r#"{"id":{device_id},"s":{seq}}"#;
     let payload = build_payload(template, 42, 7, 0);
-    let s = String::from_utf8(payload).unwrap();
+    let s = String::from_utf8(payload).expect("valid utf8");
     assert_eq!(s, r#"{"id":42,"s":7}"#);
 
     // Test with minimum size padding
     let padded = build_payload(template, 42, 7, 25);
     assert_eq!(padded.len(), 25);
-    let padded_str = String::from_utf8(padded).unwrap();
+    let padded_str = String::from_utf8(padded).expect("valid utf8");
     assert!(padded_str.starts_with(r#"{"id":42,"s":7}"#));
     assert!(padded_str.ends_with("xxxxxxxxx"));
 }
@@ -19,39 +19,39 @@ fn test_build_payload() {
 fn test_build_payload_dynamic_random_placeholders() {
     let template = r#"{"uuid":"{uuid}","int":{random_int},"float":{random_float},"bool":{random_bool},"sec":{timestamp_secs},"us":{timestamp_us}}"#;
     let payload = build_payload(template, 1, 2, 0);
-    let parsed: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+    let parsed: serde_json::Value = serde_json::from_slice(&payload).expect("valid json");
 
-    let uuid_str = parsed["uuid"].as_str().unwrap();
+    let uuid_str = parsed["uuid"].as_str().expect("uuid string");
     assert_eq!(uuid_str.len(), 36);
     assert_eq!(&uuid_str[14..15], "4");
 
-    let int_val = parsed["int"].as_i64().unwrap();
+    let int_val = parsed["int"].as_i64().expect("int value");
     assert!((0..=100).contains(&int_val));
 
-    let float_val = parsed["float"].as_f64().unwrap();
+    let float_val = parsed["float"].as_f64().expect("float value");
     assert!((20.0..=40.0).contains(&float_val));
 
     assert!(parsed["bool"].is_boolean());
-    assert!(parsed["sec"].as_u64().unwrap() > 1_700_000_000);
-    assert!(parsed["us"].as_u64().unwrap() > 1_700_000_000_000_000);
+    assert!(parsed["sec"].as_u64().expect("sec u64") > 1_700_000_000);
+    assert!(parsed["us"].as_u64().expect("us u64") > 1_700_000_000_000_000);
 }
 
 #[test]
 fn test_parametric_random_placeholders() {
     let template = r#"{"current":{random_float:80.0:120.0},"rpm":{random_int:2000:5000},"offset":{random_int:-50:-10},"fine":{random_float:0.01:0.09:3}}"#;
     let payload = build_payload(template, 10, 5, 0);
-    let parsed: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+    let parsed: serde_json::Value = serde_json::from_slice(&payload).expect("valid json");
 
-    let current = parsed["current"].as_f64().unwrap();
+    let current = parsed["current"].as_f64().expect("current float");
     assert!((80.0..=120.0).contains(&current));
 
-    let rpm = parsed["rpm"].as_i64().unwrap();
+    let rpm = parsed["rpm"].as_i64().expect("rpm i64");
     assert!((2000..=5000).contains(&rpm));
 
-    let offset = parsed["offset"].as_i64().unwrap();
+    let offset = parsed["offset"].as_i64().expect("offset i64");
     assert!((-50..=-10).contains(&offset));
 
-    let fine = parsed["fine"].as_f64().unwrap();
+    let fine = parsed["fine"].as_f64().expect("fine float");
     assert!((0.01..=0.09).contains(&fine));
 }
 

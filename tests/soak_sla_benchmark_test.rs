@@ -55,7 +55,7 @@ async fn test_live_soak_and_sla_benchmark() {
     println!("🚀 RUNNING REAL BENCHMARK: 100 Concurrent Clients x 50 Msgs (5,000 Messages)");
     println!("=======================================================");
 
-    let report = run_load_test(args).await;
+    let report = run_load_test(args).await.expect("benchmark execution");
 
     println!("\n📊 BENCHMARK EXECUTION COMPLETED:");
     println!("   Total Messages: {}", report.actual_sent);
@@ -132,7 +132,7 @@ async fn test_live_time_based_soak_benchmark() {
     println!("⏱️ RUNNING TIME-BASED SOAK TEST (50 clients for 2s Continuous Stream)");
     println!("=======================================================");
 
-    let report = run_load_test(args).await;
+    let report = run_load_test(args).await.expect("benchmark execution");
 
     println!("\n📊 SOAK TEST COMPLETED:");
     println!("   Total Sustained Messages: {}", report.actual_sent);

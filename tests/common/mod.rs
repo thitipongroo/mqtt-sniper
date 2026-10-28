@@ -11,8 +11,13 @@ pub async fn start_mock_broker_with_version(
     expected_clients: usize,
     mqtt_version: u8,
 ) -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock broker listener");
+    let port = listener
+        .local_addr()
+        .expect("retrieve listener local addr")
+        .port();
 
     tokio::spawn(async move {
         let mut client_tasks = Vec::new();

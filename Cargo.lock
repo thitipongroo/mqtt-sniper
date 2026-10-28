@@ -59,6 +59,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "anyhow"
+version = "1.0.104"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
+
+[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -402,13 +408,15 @@ dependencies = [
 name = "mqtt-sniper"
 version = "1.2.0"
 dependencies = [
+ "anyhow",
  "clap",
  "hdrhistogram",
  "indicatif",
- "libc",
+ "rlimit",
  "rumqttc",
  "serde",
  "serde_json",
+ "thiserror",
  "tokio",
 ]
 
@@ -528,6 +536,15 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "rlimit"
+version = "0.10.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7043b63bd0cd1aaa628e476b80e6d4023a3b50eb32789f2728908107bd0c793a"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

@@ -1,3 +1,4 @@
+use crate::error::{Result, SniperError};
 use hdrhistogram::Histogram;
 use std::sync::Mutex;
 
@@ -28,8 +29,11 @@ pub struct ShardedHistogramPool {
 }
 
 impl ShardedHistogramPool {
-    /// Create a new pool with a custom shard count (rounded up to power of two)
-    pub fn new(num_shards: usize) -> Self {
+    /// Create a new pool with a custom shard count (rounded up to power of two).
+    ///
+    /// # Errors
+    /// Returns `SniperError::Histogram` if histogram instantiation fails.
+    pub fn try_new(num_shards: usize) -> Result<Self> {
         let count = num_shards.next_power_of_two().clamp(8, 64);
         let mut shards = Vec::with_capacity(count);
         for _ in 0..count {
@@ -38,16 +42,22 @@ impl ShardedHistogramPool {
                 HIST_HIGH_BOUND_US,
                 HIST_SIGFIGS,
             )
-            .expect("Failed to create bounded histogram");
+            .map_err(|e| SniperError::Histogram(format!("Failed to create bounded histogram: {e}")))?;
             shards.push(HistogramShard {
                 hist: Mutex::new(hist),
             });
         }
         let mask = count - 1;
-        Self { shards, mask }
+        Ok(Self { shards, mask })
     }
 
-    /// Record a latency sample into the appropriate shard using a partition key (e.g. device_id)
+    /// Create a new pool with a custom shard count, panicking if bounds are invalid.
+    pub fn new(num_shards: usize) -> Self {
+        Self::try_new(num_shards)
+            .expect("Constant histogram bounds [1us..60s] are verified valid")
+    }
+
+    /// Record a latency sample into the appropriate shard using a partition key (e.g. device_id).
     #[inline]
     pub fn record(&self, key: usize, lat_us: u64) {
         let shard_idx = key & self.mask;
@@ -57,12 +67,12 @@ impl ShardedHistogramPool {
         }
     }
 
-    /// Number of active shards in this pool
+    /// Number of active shards in this pool.
     pub fn shard_count(&self) -> usize {
         self.shards.len()
     }
 
-    /// Total number of samples recorded across all shards
+    /// Total number of samples recorded across all shards.
     pub fn total_samples(&self) -> u64 {
         let mut total = 0u64;
         for shard in &self.shards {
@@ -73,24 +83,33 @@ impl ShardedHistogramPool {
         total
     }
 
-    /// Merge all shards into a single consolidated `Histogram<u64>`
-    pub fn merge_all(&self) -> Histogram<u64> {
+    /// Merge all shards into a single consolidated `Histogram<u64>`.
+    ///
+    /// # Errors
+    /// Returns `SniperError::Histogram` if histogram creation fails.
+    pub fn try_merge_all(&self) -> Result<Histogram<u64>> {
         let mut merged = Histogram::<u64>::new_with_bounds(
             HIST_LOW_BOUND_US,
             HIST_HIGH_BOUND_US,
             HIST_SIGFIGS,
         )
-        .expect("Failed to create merged histogram");
+        .map_err(|e| SniperError::Histogram(format!("Failed to create merged histogram: {e}")))?;
 
         for shard in &self.shards {
             if let Ok(hist) = shard.hist.lock() {
                 let _ = merged.add(&*hist);
             }
         }
-        merged
+        Ok(merged)
     }
 
-    /// Consumes the pool and merges all shards into a single `Histogram<u64>`
+    /// Merge all shards into a single consolidated `Histogram<u64>`.
+    pub fn merge_all(&self) -> Histogram<u64> {
+        self.try_merge_all()
+            .expect("Constant bounds [1us..60s] must create valid merged histogram")
+    }
+
+    /// Consumes the pool and merges all shards into a single `Histogram<u64>`.
     pub fn into_merged_histogram(self) -> Histogram<u64> {
         self.merge_all()
     }
@@ -146,7 +165,7 @@ mod tests {
         }
 
         for h in handles {
-            h.join().unwrap();
+            h.join().expect("Worker thread join should succeed");
         }
 
         assert_eq!(pool.total_samples(), (num_threads * samples_per_thread) as u64);
@@ -164,12 +183,12 @@ mod tests {
             HIST_HIGH_BOUND_US,
             HIST_SIGFIGS,
         )
-        .unwrap();
+        .expect("Reference histogram bounds must be valid");
 
         for i in 1..=10_000 {
             let val = ((i * 37 % 50_000) + 1) as u64;
             pool.record(i, val);
-            reference.record(val).unwrap();
+            reference.record(val).expect("Recording valid sample must succeed");
         }
 
         let merged = pool.into_merged_histogram();
@@ -197,7 +216,6 @@ mod tests {
         let elapsed = start.elapsed();
 
         assert_eq!(merged.len(), 100_000);
-        // Merging 16 shards should take under 10 milliseconds (typically < 0.2 ms)
         assert!(
             elapsed.as_millis() < 10,
             "Merge took too long: {:?}",
