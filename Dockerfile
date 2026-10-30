@@ -3,9 +3,10 @@ FROM rust:alpine AS builder
 RUN apk add --no-cache musl-dev gcc
 WORKDIR /usr/src/mqtt-sniper
 
-# Copy manifests and source
+# Copy manifests and source (benches is declared in Cargo.toml, so it must exist to parse it)
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+COPY benches ./benches
 
 # Build release binary (stripped & LTO via Cargo.toml release profile)
 RUN cargo build --release
