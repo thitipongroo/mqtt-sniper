@@ -279,7 +279,8 @@ pub async fn run_client_v3(ctx: ClientSpawnContext) {
                         break;
                     }
                     Ok(_) => {}
-                    Err(_) => {
+                    Err(e) => {
+                        eprintln!("⚠️  device {device_id}: MQTT connection error: {e}");
                         stats.record_failure();
                         break;
                     }
@@ -519,7 +520,8 @@ pub async fn run_client_v5(ctx: ClientSpawnContext) {
                         break;
                     }
                     Ok(_) => {}
-                    Err(_) => {
+                    Err(e) => {
+                        eprintln!("⚠️  device {device_id}: MQTT connection error: {e}");
                         stats.record_failure();
                         break;
                     }
