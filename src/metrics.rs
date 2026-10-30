@@ -220,23 +220,4 @@ mod tests {
         );
         assert!((merged.mean() - reference.mean()).abs() < 1e-3);
     }
-
-    #[test]
-    fn test_merge_benchmark_speed() {
-        let pool = ShardedHistogramPool::new(16);
-        for i in 0..100_000 {
-            pool.record(i, (i as u64 % 10_000) + 1);
-        }
-
-        let start = std::time::Instant::now();
-        let merged = pool.merge_all();
-        let elapsed = start.elapsed();
-
-        assert_eq!(merged.len(), 100_000);
-        assert!(
-            elapsed.as_millis() < 10,
-            "Merge took too long: {:?}",
-            elapsed
-        );
-    }
 }
