@@ -42,7 +42,9 @@ impl ShardedHistogramPool {
                 HIST_HIGH_BOUND_US,
                 HIST_SIGFIGS,
             )
-            .map_err(|e| SniperError::Histogram(format!("Failed to create bounded histogram: {e}")))?;
+            .map_err(|e| {
+                SniperError::Histogram(format!("Failed to create bounded histogram: {e}"))
+            })?;
             shards.push(HistogramShard {
                 hist: Mutex::new(hist),
             });
@@ -53,8 +55,7 @@ impl ShardedHistogramPool {
 
     /// Create a new pool with a custom shard count, panicking if bounds are invalid.
     pub fn new(num_shards: usize) -> Self {
-        Self::try_new(num_shards)
-            .expect("Constant histogram bounds [1us..60s] are verified valid")
+        Self::try_new(num_shards).expect("Constant histogram bounds [1us..60s] are verified valid")
     }
 
     /// Record a latency sample into the appropriate shard using a partition key (e.g. device_id).
@@ -88,12 +89,11 @@ impl ShardedHistogramPool {
     /// # Errors
     /// Returns `SniperError::Histogram` if histogram creation fails.
     pub fn try_merge_all(&self) -> Result<Histogram<u64>> {
-        let mut merged = Histogram::<u64>::new_with_bounds(
-            HIST_LOW_BOUND_US,
-            HIST_HIGH_BOUND_US,
-            HIST_SIGFIGS,
-        )
-        .map_err(|e| SniperError::Histogram(format!("Failed to create merged histogram: {e}")))?;
+        let mut merged =
+            Histogram::<u64>::new_with_bounds(HIST_LOW_BOUND_US, HIST_HIGH_BOUND_US, HIST_SIGFIGS)
+                .map_err(|e| {
+                    SniperError::Histogram(format!("Failed to create merged histogram: {e}"))
+                })?;
 
         for shard in &self.shards {
             if let Ok(hist) = shard.hist.lock() {
@@ -168,7 +168,10 @@ mod tests {
             h.join().expect("Worker thread join should succeed");
         }
 
-        assert_eq!(pool.total_samples(), (num_threads * samples_per_thread) as u64);
+        assert_eq!(
+            pool.total_samples(),
+            (num_threads * samples_per_thread) as u64
+        );
         let merged = pool.merge_all();
         assert_eq!(merged.len(), (num_threads * samples_per_thread) as u64);
         assert_eq!(merged.value_at_quantile(0.50), 500);
@@ -178,17 +181,16 @@ mod tests {
     #[test]
     fn test_sharded_histogram_pool_statistical_equivalence() {
         let pool = ShardedHistogramPool::new(16);
-        let mut reference = Histogram::<u64>::new_with_bounds(
-            HIST_LOW_BOUND_US,
-            HIST_HIGH_BOUND_US,
-            HIST_SIGFIGS,
-        )
-        .expect("Reference histogram bounds must be valid");
+        let mut reference =
+            Histogram::<u64>::new_with_bounds(HIST_LOW_BOUND_US, HIST_HIGH_BOUND_US, HIST_SIGFIGS)
+                .expect("Reference histogram bounds must be valid");
 
         for i in 1..=10_000 {
             let val = ((i * 37 % 50_000) + 1) as u64;
             pool.record(i, val);
-            reference.record(val).expect("Recording valid sample must succeed");
+            reference
+                .record(val)
+                .expect("Recording valid sample must succeed");
         }
 
         let merged = pool.into_merged_histogram();
@@ -196,11 +198,26 @@ mod tests {
         assert_eq!(merged.len(), reference.len());
         assert_eq!(merged.min(), reference.min());
         assert_eq!(merged.max(), reference.max());
-        assert_eq!(merged.value_at_quantile(0.50), reference.value_at_quantile(0.50));
-        assert_eq!(merged.value_at_quantile(0.90), reference.value_at_quantile(0.90));
-        assert_eq!(merged.value_at_quantile(0.95), reference.value_at_quantile(0.95));
-        assert_eq!(merged.value_at_quantile(0.99), reference.value_at_quantile(0.99));
-        assert_eq!(merged.value_at_quantile(0.999), reference.value_at_quantile(0.999));
+        assert_eq!(
+            merged.value_at_quantile(0.50),
+            reference.value_at_quantile(0.50)
+        );
+        assert_eq!(
+            merged.value_at_quantile(0.90),
+            reference.value_at_quantile(0.90)
+        );
+        assert_eq!(
+            merged.value_at_quantile(0.95),
+            reference.value_at_quantile(0.95)
+        );
+        assert_eq!(
+            merged.value_at_quantile(0.99),
+            reference.value_at_quantile(0.99)
+        );
+        assert_eq!(
+            merged.value_at_quantile(0.999),
+            reference.value_at_quantile(0.999)
+        );
         assert!((merged.mean() - reference.mean()).abs() < 1e-3);
     }
 

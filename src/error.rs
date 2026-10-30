@@ -34,4 +34,3 @@ pub enum SniperError {
 
 /// Specialized Result type for `mqtt-sniper` operations.
 pub type Result<T> = std::result::Result<T, SniperError>;
-

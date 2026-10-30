@@ -263,8 +263,9 @@ pub fn resolve_payload_template(args: &Args) -> Result<String> {
     }
 
     if let Some(ref path) = args.payload_file {
-        let content = fs::read_to_string(path)
-            .map_err(|e| SniperError::Payload(format!("Failed to read payload file '{path}': {e}")))?;
+        let content = fs::read_to_string(path).map_err(|e| {
+            SniperError::Payload(format!("Failed to read payload file '{path}': {e}"))
+        })?;
         Ok(content.trim().to_string())
     } else {
         Ok(args.payload.clone())
@@ -280,10 +281,12 @@ pub fn build_transport(args: &Args) -> Result<Transport> {
 
     let client_auth = match (&args.cert, &args.key) {
         (Some(cert_path), Some(key_path)) => {
-            let cert_bytes = fs::read(cert_path)
-                .map_err(|e| SniperError::Tls(format!("Failed to read client cert '{cert_path}': {e}")))?;
-            let key_bytes = fs::read(key_path)
-                .map_err(|e| SniperError::Tls(format!("Failed to read client key '{key_path}': {e}")))?;
+            let cert_bytes = fs::read(cert_path).map_err(|e| {
+                SniperError::Tls(format!("Failed to read client cert '{cert_path}': {e}"))
+            })?;
+            let key_bytes = fs::read(key_path).map_err(|e| {
+                SniperError::Tls(format!("Failed to read client key '{key_path}': {e}"))
+            })?;
             Some((cert_bytes, key_bytes))
         }
         (Some(_), None) | (None, Some(_)) => {
@@ -375,9 +378,7 @@ pub fn evaluate_fd_limits(
         clients
     };
 
-    let safe_limit = soft_limit
-        .saturating_sub(FD_SAFETY_MARGIN)
-        .max(1) as usize;
+    let safe_limit = soft_limit.saturating_sub(FD_SAFETY_MARGIN).max(1) as usize;
 
     let is_exceeded = (target as u64) > soft_limit.saturating_sub(FD_SAFETY_MARGIN);
 

@@ -138,7 +138,10 @@ pub async fn run_client_v3(ctx: ClientSpawnContext) {
                             break;
                         }
                         j += 1;
-                        if pacer.pace_interval(Some(deadline), &mut worker_shutdown).await {
+                        if pacer
+                            .pace_interval(Some(deadline), &mut worker_shutdown)
+                            .await
+                        {
                             break;
                         }
                     }
@@ -166,7 +169,8 @@ pub async fn run_client_v3(ctx: ClientSpawnContext) {
                         {
                             break;
                         }
-                        if j + 1 < messages && pacer.pace_interval(None, &mut worker_shutdown).await {
+                        if j + 1 < messages && pacer.pace_interval(None, &mut worker_shutdown).await
+                        {
                             break;
                         }
                     }
@@ -374,7 +378,10 @@ pub async fn run_client_v5(ctx: ClientSpawnContext) {
                             break;
                         }
                         j += 1;
-                        if pacer.pace_interval(Some(deadline), &mut worker_shutdown).await {
+                        if pacer
+                            .pace_interval(Some(deadline), &mut worker_shutdown)
+                            .await
+                        {
                             break;
                         }
                     }
@@ -402,7 +409,8 @@ pub async fn run_client_v5(ctx: ClientSpawnContext) {
                         {
                             break;
                         }
-                        if j + 1 < messages && pacer.pace_interval(None, &mut worker_shutdown).await {
+                        if j + 1 < messages && pacer.pace_interval(None, &mut worker_shutdown).await
+                        {
                             break;
                         }
                     }
@@ -523,4 +531,3 @@ pub async fn run_client_v5(ctx: ClientSpawnContext) {
     worker.abort();
     let _ = worker.await;
 }
-

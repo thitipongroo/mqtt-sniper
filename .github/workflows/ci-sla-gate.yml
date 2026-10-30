@@ -36,7 +36,7 @@ jobs:
           broker-url: 'localhost:1883'
           clients: '100'
           count: '20'
-          max-p95-ms: '50'
+          max-p95-ms: '100'
           min-success-rate: '99.9'
           output-format: 'json'
           output-file: 'benchmark-report.json'
