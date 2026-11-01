@@ -21,7 +21,7 @@ struct HistogramShard {
 /// (which consumes ~3.5-4.0 GB of RAM and stalls CPU during 100k sequential merges),
 /// this pool partitions latency samples across a small, fixed number of core-aligned shards (e.g. 8 - 64).
 ///
-/// This slashes memory consumption by >95% (down to <1 MB for the histogram pool)
+/// This slashes memory consumption by >95% (down to <2.5 MB for the histogram pool)
 /// and reduces final merge latency to < 1 ms while preserving 100% statistical accuracy.
 pub struct ShardedHistogramPool {
     shards: Vec<HistogramShard>,
@@ -63,7 +63,9 @@ impl ShardedHistogramPool {
     pub fn record(&self, key: usize, lat_us: u64) {
         let shard_idx = key & self.mask;
         let clamped = lat_us.clamp(HIST_LOW_BOUND_US, HIST_HIGH_BOUND_US);
-        if let Ok(mut hist) = self.shards[shard_idx].hist.lock() {
+        if let Some(shard) = self.shards.get(shard_idx)
+            && let Ok(mut hist) = shard.hist.lock()
+        {
             let _ = hist.record(clamped);
         }
     }
@@ -129,6 +131,12 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use std::thread;
+
+    #[test]
+    fn test_histogram_shard_cache_line_alignment() {
+        assert_eq!(std::mem::align_of::<HistogramShard>(), 64);
+        assert_eq!(std::mem::size_of::<HistogramShard>() % 64, 0);
+    }
 
     #[test]
     fn test_sharded_histogram_pool_single_thread() {
@@ -219,5 +227,26 @@ mod tests {
             reference.value_at_quantile(0.999)
         );
         assert!((merged.mean() - reference.mean()).abs() < 1e-3);
+    }
+
+    #[test]
+    fn test_sharded_histogram_pool_merge_timing_and_scale() {
+        let pool = ShardedHistogramPool::new(64);
+        for i in 0..100_000 {
+            pool.record(i, ((i % 10_000) + 1) as u64);
+        }
+        assert_eq!(pool.total_samples(), 100_000);
+
+        let start = std::time::Instant::now();
+        let merged = pool.merge_all();
+        let elapsed = start.elapsed();
+
+        assert_eq!(merged.len(), 100_000);
+        // Even in unoptimized debug build, merging 64 shards should execute in < 25ms (in release it is < 1ms)
+        assert!(
+            elapsed.as_millis() < 25,
+            "Merge time should be under 25ms, got {:?}",
+            elapsed
+        );
     }
 }
