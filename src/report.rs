@@ -107,56 +107,82 @@ pub struct BenchmarkReport {
     pub sla: SlaReport,
 
     // Flat fields retained for backward compatibility with runner.rs and tests
+    /// Target MQTT broker host or IP
     #[serde(skip_serializing)]
     pub broker: String,
+    /// Target broker TCP port
     #[serde(skip_serializing)]
     pub port: u16,
+    /// Benchmark operation mode (pub, sub, conn)
     #[serde(skip_serializing)]
     pub mode: Mode,
+    /// Protocol version (3, 4, or 5)
     #[serde(skip_serializing)]
     pub mqtt_version: u8,
+    /// Whether TLS encryption was enabled
     #[serde(skip_serializing)]
     pub tls: bool,
+    /// Total configured concurrent clients
     #[serde(skip_serializing)]
     pub clients: usize,
+    /// Configured messages per client
     #[serde(skip_serializing)]
     pub messages_per_client: usize,
+    /// Configured soak duration in seconds
     #[serde(skip_serializing)]
     pub duration_secs: u64,
+    /// Configured MQTT QoS level
     #[serde(skip_serializing)]
     pub qos: u8,
+    /// Retain message flag
     #[serde(skip_serializing)]
     pub retain: bool,
+    /// Clean session / clean start flag
     #[serde(skip_serializing)]
     pub clean_session: bool,
+    /// Expected total message target
     #[serde(skip_serializing)]
     pub target_messages: usize,
+    /// Actual total successful messages or connections
     #[serde(skip_serializing)]
     pub actual_sent: usize,
+    /// Total malformed chaos messages injected
     #[serde(skip_serializing)]
     pub malformed_sent: usize,
+    /// Total failed clients or connection drops
     #[serde(skip_serializing)]
     pub failed_clients: usize,
+    /// Normalized delivery or connection success rate (0.0 to 1.0)
     #[serde(skip_serializing)]
     pub success_rate: f64,
+    /// Whether all configured SLA thresholds passed
     #[serde(skip_serializing)]
     pub slo_passed: bool,
+    /// Wall-clock duration of the benchmark in seconds
     #[serde(skip_serializing)]
     pub elapsed_secs: f64,
+    /// Calculated throughput in messages or connections per second
     #[serde(skip_serializing)]
     pub throughput_msgs_per_sec: f64,
+    /// Minimum observed latency in milliseconds
     #[serde(skip_serializing)]
     pub latency_min_ms: f64,
+    /// Arithmetic mean latency in milliseconds
     #[serde(skip_serializing)]
     pub latency_avg_ms: f64,
+    /// 50th percentile (median) latency in milliseconds
     #[serde(skip_serializing)]
     pub latency_p50_ms: f64,
+    /// 90th percentile latency in milliseconds
     #[serde(skip_serializing)]
     pub latency_p90_ms: f64,
+    /// 95th percentile latency in milliseconds
     #[serde(skip_serializing)]
     pub latency_p95_ms: f64,
+    /// 99th percentile latency in milliseconds
     #[serde(skip_serializing)]
     pub latency_p99_ms: f64,
+    /// Maximum observed latency in milliseconds
     #[serde(skip_serializing)]
     pub latency_max_ms: f64,
 }

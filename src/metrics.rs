@@ -28,6 +28,21 @@ pub struct ShardedHistogramPool {
     mask: usize,
 }
 
+fn fallback_histogram() -> Histogram<u64> {
+    if let Ok(h) =
+        Histogram::<u64>::new_with_bounds(HIST_LOW_BOUND_US, HIST_HIGH_BOUND_US, HIST_SIGFIGS)
+    {
+        return h;
+    }
+    if let Ok(h) = Histogram::<u64>::new(HIST_SIGFIGS) {
+        return h;
+    }
+    match Histogram::<u64>::new(1) {
+        Ok(h) => h,
+        Err(_) => unreachable!("Histogram::new(1) cannot fail with sigfigs=1"),
+    }
+}
+
 impl ShardedHistogramPool {
     /// Create a new pool with a custom shard count (rounded up to power of two).
     ///
@@ -53,9 +68,21 @@ impl ShardedHistogramPool {
         Ok(Self { shards, mask })
     }
 
-    /// Create a new pool with a custom shard count, panicking if bounds are invalid.
+    /// Create a new pool with a custom shard count (rounded up to power of two, bounded 8..64).
     pub fn new(num_shards: usize) -> Self {
-        Self::try_new(num_shards).expect("Constant histogram bounds [1us..60s] are verified valid")
+        Self::try_new(num_shards).unwrap_or_else(|_| {
+            let count = num_shards.next_power_of_two().clamp(8, 64);
+            let mut shards = Vec::with_capacity(count);
+            for _ in 0..count {
+                shards.push(HistogramShard {
+                    hist: Mutex::new(fallback_histogram()),
+                });
+            }
+            Self {
+                shards,
+                mask: count - 1,
+            }
+        })
     }
 
     /// Record a latency sample into the appropriate shard using a partition key (e.g. device_id).
@@ -107,8 +134,15 @@ impl ShardedHistogramPool {
 
     /// Merge all shards into a single consolidated `Histogram<u64>`.
     pub fn merge_all(&self) -> Histogram<u64> {
-        self.try_merge_all()
-            .expect("Constant bounds [1us..60s] must create valid merged histogram")
+        self.try_merge_all().unwrap_or_else(|_| {
+            let mut fallback = fallback_histogram();
+            for shard in &self.shards {
+                if let Ok(hist) = shard.hist.lock() {
+                    let _ = fallback.add(&*hist);
+                }
+            }
+            fallback
+        })
     }
 
     /// Consumes the pool and merges all shards into a single `Histogram<u64>`.

@@ -1,8 +1,12 @@
 //! Benchmark execution engine and client orchestration module for MQTT Sniper.
 
+/// Simulated MQTT v3.1.1 client worker task.
 pub mod client;
+/// Simulated MQTT v5.0 client worker task.
 pub mod client_v5;
+/// Inter-message and ramp-up pacing regulator.
 pub mod pacer;
+/// Shared thread-safe benchmark counters and statistics aggregator.
 pub mod stats;
 
 use crate::cli::{

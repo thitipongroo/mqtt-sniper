@@ -147,6 +147,7 @@ fn process_parametric_random_placeholders(mut text: String, seed: u64) -> String
     text
 }
 
+/// Render a dynamic MQTT payload replacing device ID, sequence, timestamp, and parametric random placeholders.
 pub fn build_payload(template: &str, device_id: usize, seq: usize, min_size: usize) -> Vec<u8> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -186,6 +187,7 @@ pub fn build_payload(template: &str, device_id: usize, seq: usize, min_size: usi
     rendered.into_bytes()
 }
 
+/// Render a payload with optional deterministic pseudo-random chaos corruption for dead-letter-queue testing.
 pub fn build_payload_with_chaos(
     template: &str,
     device_id: usize,
