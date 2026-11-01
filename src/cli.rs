@@ -341,11 +341,11 @@ pub fn get_os_fd_limits() -> (u64, u64) {
 
 /// Attempt to raise the soft file descriptor limit up to hard limit on Unix safely
 #[cfg(unix)]
-pub fn try_raise_fd_limit(desired: u64) -> u64 {
-    let (soft, hard) = get_os_fd_limits();
-    if desired > soft && hard > soft {
-        let target = desired.min(hard);
-        if rlimit::Resource::NOFILE.set(target, hard).is_ok() {
+pub fn try_raise_fd_limit(_desired: u64) -> u64 {
+    let (soft, _hard) = get_os_fd_limits();
+    if _desired > soft && _hard > soft {
+        let target = _desired.min(_hard);
+        if rlimit::Resource::NOFILE.set(target, _hard).is_ok() {
             return target;
         }
     }
@@ -358,11 +358,11 @@ pub fn get_os_fd_limits() -> (u64, u64) {
     (16_384, 65_535)
 }
 
-/// Attempt to raise limit on non-unix platforms (no-op clamp)
+/// Attempt to raise limit on non-unix platforms (runtime adjustment unsupported; returns soft limit)
 #[cfg(not(unix))]
-pub fn try_raise_fd_limit(desired: u64) -> u64 {
-    let (soft, hard) = get_os_fd_limits();
-    desired.min(hard).max(soft)
+pub fn try_raise_fd_limit(_desired: u64) -> u64 {
+    let (soft, _hard) = get_os_fd_limits();
+    soft
 }
 
 /// Deterministically evaluate file descriptor safety against given limits
@@ -695,6 +695,15 @@ mod tests {
         assert_eq!(check.safe_limit, 960);
         assert!(!check.is_exceeded);
         assert!(check.warning.is_none());
+    }
+
+    #[test]
+    fn test_check_file_descriptor_limits_high_connections_exceeded() {
+        let check = check_file_descriptor_limits(50_000, 0);
+        assert_eq!(check.target_connections, 50_000);
+        assert!(check.is_exceeded);
+        assert!(check.warning.is_some());
+        assert!(check.safe_limit < 50_000);
     }
 
     #[test]

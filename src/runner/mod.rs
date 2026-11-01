@@ -259,8 +259,10 @@ mod tests {
 
     #[test]
     fn test_file_descriptor_safeguard_bounds_semaphore() {
-        let args = Args::parse_from(["mqtt-sniper", "-c", "100000"]);
+        let args = Args::parse_from(["mqtt-sniper", "-c", "50000"]);
         let fd_check = check_file_descriptor_limits(args.clients, args.max_connections);
+        assert!(fd_check.is_exceeded);
         assert!(fd_check.safe_limit > 0);
+        assert!(fd_check.safe_limit < args.clients);
     }
 }

@@ -14,6 +14,7 @@ pub async fn start_mock_broker_with_version(
     // The mock broker shares this process with the clients, so every connection costs two
     // file descriptors (and tests run in parallel). The runner only budgets for the client
     // side, which exhausts macOS's default `ulimit -n 256` and silently drops accepts.
+    #[cfg(unix)]
     let _ = rlimit::increase_nofile_limit(u64::MAX);
 
     let listener = TcpListener::bind("127.0.0.1:0")

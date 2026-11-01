@@ -6,7 +6,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::time::Instant;
 
 /// Extract latency in microseconds from a received JSON payload containing a timestamp.
-/// If payload parsing fails or clock stepped backward, falls back to monotonic elapsed time.
+/// If payload parsing fails or clock stepped backward (NTP step / leap second),
+/// falls back to monotonic elapsed time from `fallback_start` (CWE-754 prevention).
 pub fn extract_payload_latency_us(payload: &[u8], fallback_start: Instant) -> u64 {
     if let Ok(val) = serde_json::from_slice::<serde_json::Value>(payload)
         && let Some(raw_ts) = val
@@ -29,7 +30,7 @@ pub fn extract_payload_latency_us(payload: &[u8], fallback_start: Instant) -> u6
             .unwrap_or_default()
             .as_micros() as u64;
         if now_us >= ts_us {
-            return (now_us - ts_us).max(1);
+            return now_us.saturating_sub(ts_us).max(1);
         }
     }
     fallback_start.elapsed().as_micros().max(1) as u64
@@ -122,9 +123,20 @@ mod tests {
     #[test]
     fn test_extract_payload_latency_ntp_backward_step_resilience() {
         let fallback = Instant::now();
+        // Case 1: Payload timestamp is far in future (NTP stepped local clock backward or sender clock ahead)
         let future_payload = r#"{"ts": 9999999999999999}"#;
         let lat = extract_payload_latency_us(future_payload.as_bytes(), fallback);
         assert!(lat >= 1);
+
+        // Case 2: Payload with 0 or non-Unix timestamp
+        let zero_payload = r#"{"ts": 0}"#;
+        let lat_zero = extract_payload_latency_us(zero_payload.as_bytes(), fallback);
+        assert!(lat_zero >= 1);
+
+        // Case 3: Binary/corrupted payload falls back to monotonic Instant
+        let corrupt_payload = b"\xFF\xFE\xFD";
+        let lat_corrupt = extract_payload_latency_us(corrupt_payload, fallback);
+        assert!(lat_corrupt >= 1);
     }
 
     #[test]

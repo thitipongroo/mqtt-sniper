@@ -40,6 +40,10 @@ pub async fn run_client_v5(ctx: ClientSpawnContext) {
         mut loop_shutdown,
     } = ctx;
 
+    if *loop_shutdown.borrow() {
+        return;
+    }
+
     let qos = match qos_num {
         0 => QoS5::AtMostOnce,
         1 => QoS5::AtLeastOnce,
@@ -48,7 +52,12 @@ pub async fn run_client_v5(ctx: ClientSpawnContext) {
     };
 
     let _permit = match sem_clone {
-        Some(ref sem) => sem.acquire().await.ok(),
+        Some(ref sem) => {
+            tokio::select! {
+                permit = sem.acquire() => permit.ok(),
+                _ = loop_shutdown.changed() => return,
+            }
+        }
         None => None,
     };
 
@@ -234,7 +243,8 @@ pub async fn run_client_v5(ctx: ClientSpawnContext) {
                         break;
                     }
                     Ok(_) => {}
-                    Err(_) => {
+                    Err(e) => {
+                        eprintln!("⚠️  device {device_id}: MQTT connection error: {e}");
                         stats.record_failure();
                         break;
                     }
