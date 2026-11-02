@@ -699,11 +699,13 @@ mod tests {
 
     #[test]
     fn test_check_file_descriptor_limits_high_connections_exceeded() {
-        let check = check_file_descriptor_limits(50_000, 0);
-        assert_eq!(check.target_connections, 50_000);
+        let (soft, hard) = get_os_fd_limits();
+        let exceeds = (hard.max(soft) as usize).saturating_add(10_000);
+        let check = check_file_descriptor_limits(exceeds, 0);
+        assert_eq!(check.target_connections, exceeds);
         assert!(check.is_exceeded);
         assert!(check.warning.is_some());
-        assert!(check.safe_limit < 50_000);
+        assert!(check.safe_limit < exceeds);
     }
 
     #[test]

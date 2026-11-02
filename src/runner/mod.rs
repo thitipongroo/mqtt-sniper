@@ -263,7 +263,9 @@ mod tests {
 
     #[test]
     fn test_file_descriptor_safeguard_bounds_semaphore() {
-        let args = Args::parse_from(["mqtt-sniper", "-c", "50000"]);
+        let (soft, hard) = crate::cli::get_os_fd_limits();
+        let exceeds = (hard.max(soft) as usize).saturating_add(10_000);
+        let args = Args::parse_from(["mqtt-sniper", "-c", &exceeds.to_string()]);
         let fd_check = check_file_descriptor_limits(args.clients, args.max_connections);
         assert!(fd_check.is_exceeded);
         assert!(fd_check.safe_limit > 0);
