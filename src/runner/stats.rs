@@ -5,17 +5,30 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::time::Instant;
 
-/// Extract latency in microseconds from a received JSON payload containing a timestamp.
+/// Extract latency in microseconds from a received JSON, Protobuf, or Avro payload containing a timestamp.
 /// If payload parsing fails or clock stepped backward (NTP step / leap second),
 /// falls back to monotonic elapsed time from `fallback_start` (CWE-754 prevention).
 pub fn extract_payload_latency_us(payload: &[u8], fallback_start: Instant) -> u64 {
-    if let Ok(val) = serde_json::from_slice::<serde_json::Value>(payload)
+    let now_us = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros() as u64;
+
+    let maybe_ts = if let Ok(val) = serde_json::from_slice::<serde_json::Value>(payload)
         && let Some(raw_ts) = val
             .get("ts")
             .or_else(|| val.get("timestamp"))
             .or_else(|| val.get("time"))
             .and_then(|v| v.as_u64())
     {
+        Some(raw_ts)
+    } else if let Some(raw_ts) = crate::payload::extract_protobuf_timestamp(payload) {
+        Some(raw_ts)
+    } else {
+        crate::payload::extract_avro_timestamp(payload)
+    };
+
+    if let Some(raw_ts) = maybe_ts {
         // Auto-detect Unix timestamp precision: seconds (~10^9), milliseconds (~10^12), or microseconds (~10^15)
         let ts_us = if raw_ts < 10_000_000_000 {
             raw_ts.saturating_mul(1_000_000)
@@ -25,14 +38,11 @@ pub fn extract_payload_latency_us(payload: &[u8], fallback_start: Instant) -> u6
             raw_ts
         };
 
-        let now_us = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_micros() as u64;
         if now_us >= ts_us {
             return now_us.saturating_sub(ts_us).max(1);
         }
     }
+
     fallback_start.elapsed().as_micros().max(1) as u64
 }
 
@@ -45,8 +55,14 @@ pub struct RunnerStats {
     pub malformed_counter: Arc<AtomicUsize>,
     /// Count of failed clients or connection drops
     pub failed_counter: Arc<AtomicUsize>,
+    /// Count of intentionally dropped packets due to chaos network fault injection
+    pub dropped_counter: Arc<AtomicUsize>,
+    /// Count of recorded jitter delay samples
+    pub jitter_counter: Arc<AtomicUsize>,
     /// Core-partitioned sharded histogram pool for low-memory latency aggregation
     pub hist_pool: Arc<ShardedHistogramPool>,
+    /// Core-partitioned sharded histogram pool for jitter distribution aggregation
+    pub jitter_hist_pool: Arc<ShardedHistogramPool>,
 }
 
 impl RunnerStats {
@@ -56,7 +72,10 @@ impl RunnerStats {
             published_counter: Arc::new(AtomicUsize::new(0)),
             malformed_counter: Arc::new(AtomicUsize::new(0)),
             failed_counter: Arc::new(AtomicUsize::new(0)),
+            dropped_counter: Arc::new(AtomicUsize::new(0)),
+            jitter_counter: Arc::new(AtomicUsize::new(0)),
             hist_pool,
+            jitter_hist_pool: Arc::new(ShardedHistogramPool::default()),
         }
     }
 
@@ -79,6 +98,32 @@ impl RunnerStats {
         self.failed_counter.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Increment the dropped packet counter.
+    #[inline]
+    pub fn record_dropped(&self) {
+        self.dropped_counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record an injected network jitter sample.
+    #[inline]
+    pub fn record_jitter(&self, device_id: usize, jitter_ms: u64) {
+        self.jitter_counter.fetch_add(1, Ordering::Relaxed);
+        let jitter_us = (jitter_ms.saturating_mul(1000)).max(1);
+        self.jitter_hist_pool.record(device_id, jitter_us);
+    }
+
+    /// Get total count of dropped packets.
+    #[inline]
+    pub fn dropped_packets(&self) -> usize {
+        self.dropped_counter.load(Ordering::Relaxed)
+    }
+
+    /// Get total count of jitter samples recorded.
+    #[inline]
+    pub fn jitter_samples(&self) -> usize {
+        self.jitter_counter.load(Ordering::Relaxed)
+    }
+
     /// Return a snapshot of `(published_count, malformed_count, failed_clients)`.
     pub fn snapshot(&self) -> (usize, usize, usize) {
         (
@@ -88,9 +133,25 @@ impl RunnerStats {
         )
     }
 
+    /// Return a complete snapshot of `(published, malformed, failed, dropped, jitter_samples)`.
+    pub fn snapshot_all(&self) -> (usize, usize, usize, usize, usize) {
+        (
+            self.published_counter.load(Ordering::Relaxed),
+            self.malformed_counter.load(Ordering::Relaxed),
+            self.failed_counter.load(Ordering::Relaxed),
+            self.dropped_counter.load(Ordering::Relaxed),
+            self.jitter_counter.load(Ordering::Relaxed),
+        )
+    }
+
     /// Merge all latency samples across shards into a single consolidated `Histogram<u64>`.
     pub fn merge_histogram(&self) -> Histogram<u64> {
         self.hist_pool.merge_all()
+    }
+
+    /// Merge all jitter samples across shards into a single consolidated `Histogram<u64>`.
+    pub fn merge_jitter_histogram(&self) -> Histogram<u64> {
+        self.jitter_hist_pool.merge_all()
     }
 }
 

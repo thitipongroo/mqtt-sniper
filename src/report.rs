@@ -60,6 +60,10 @@ pub struct MetricsReport {
     pub duration_seconds: f64,
     /// Effective throughput in messages per second
     pub throughput_msg_per_sec: f64,
+    /// Total dropped packets due to chaos network fault injection
+    pub dropped_packets: usize,
+    /// Observed packet drop percentage (0.0 to 100.0)
+    pub drop_rate_percent: f64,
 }
 
 /// Latency distribution percentiles in milliseconds.
@@ -77,6 +81,27 @@ pub struct LatencyMsReport {
     pub p99: f64,
     /// Maximum recorded latency
     pub max: f64,
+}
+
+/// Jitter distribution percentiles and statistics in milliseconds.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct JitterMsReport {
+    /// Minimum recorded jitter
+    pub min: f64,
+    /// Arithmetic mean jitter
+    pub avg: f64,
+    /// 50th percentile (median) jitter
+    pub p50: f64,
+    /// 90th percentile jitter
+    pub p90: f64,
+    /// 95th percentile jitter
+    pub p95: f64,
+    /// 99th percentile jitter
+    pub p99: f64,
+    /// Maximum recorded jitter
+    pub max: f64,
+    /// Total number of jitter delay samples recorded
+    pub samples: usize,
 }
 
 /// Service Level Agreement (SLA) verification result.
@@ -103,6 +128,9 @@ pub struct BenchmarkReport {
     pub metrics: MetricsReport,
     /// Latency breakdown across percentiles
     pub latency_ms: LatencyMsReport,
+    /// Jitter breakdown across percentiles, if jitter injection was active
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jitter_ms: Option<JitterMsReport>,
     /// SLA pass/fail evaluation
     pub sla: SlaReport,
 
@@ -185,6 +213,12 @@ pub struct BenchmarkReport {
     /// Maximum observed latency in milliseconds
     #[serde(skip_serializing)]
     pub latency_max_ms: f64,
+    /// Total dropped packets due to chaos network fault injection
+    #[serde(skip_serializing)]
+    pub dropped_packets: usize,
+    /// Total jitter samples recorded
+    #[serde(skip_serializing)]
+    pub jitter_samples: usize,
 }
 
 impl BenchmarkReport {
@@ -196,6 +230,30 @@ impl BenchmarkReport {
         malformed_sent: usize,
         failed_clients: usize,
         hist: &Histogram<u64>,
+    ) -> Self {
+        Self::with_chaos(
+            args,
+            elapsed,
+            actual_sent,
+            malformed_sent,
+            failed_clients,
+            0,
+            hist,
+            None,
+        )
+    }
+
+    /// Construct a new `BenchmarkReport` including network chaos and jitter injection metrics.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_chaos(
+        args: &Args,
+        elapsed: Duration,
+        actual_sent: usize,
+        malformed_sent: usize,
+        failed_clients: usize,
+        dropped_packets: usize,
+        hist: &Histogram<u64>,
+        jitter_hist: Option<&Histogram<u64>>,
     ) -> Self {
         let target_messages = if args.mode == Mode::Conn {
             args.clients
@@ -252,6 +310,12 @@ impl BenchmarkReport {
 
         let failure_count = target_messages.saturating_sub(actual_sent) + failed_clients;
 
+        let drop_rate = if target_messages > 0 {
+            (dropped_packets as f64 / target_messages as f64) * 100.0
+        } else {
+            0.0
+        };
+
         let target = TargetReport {
             broker: broker_target,
             clients: args.clients,
@@ -265,6 +329,8 @@ impl BenchmarkReport {
             success_rate_percent: ((success_rate * 100.0 * 100.0).round()) / 100.0,
             duration_seconds: ((elapsed_secs * 100.0).round()) / 100.0,
             throughput_msg_per_sec: ((throughput * 100.0).round()) / 100.0,
+            dropped_packets,
+            drop_rate_percent: ((drop_rate * 100.0).round()) / 100.0,
         };
 
         let latency_ms = LatencyMsReport {
@@ -275,6 +341,24 @@ impl BenchmarkReport {
             p99: ((p99_ms * 100.0).round()) / 100.0,
             max: ((max_ms * 100.0).round()) / 100.0,
         };
+
+        let jitter_ms = jitter_hist.and_then(|jh| {
+            if !jh.is_empty() {
+                Some(JitterMsReport {
+                    min: ((jh.min() as f64 / 1000.0 * 100.0).round()) / 100.0,
+                    avg: ((jh.mean() / 1000.0 * 100.0).round()) / 100.0,
+                    p50: ((jh.value_at_quantile(0.50) as f64 / 1000.0 * 100.0).round()) / 100.0,
+                    p90: ((jh.value_at_quantile(0.90) as f64 / 1000.0 * 100.0).round()) / 100.0,
+                    p95: ((jh.value_at_quantile(0.95) as f64 / 1000.0 * 100.0).round()) / 100.0,
+                    p99: ((jh.value_at_quantile(0.99) as f64 / 1000.0 * 100.0).round()) / 100.0,
+                    max: ((jh.max() as f64 / 1000.0 * 100.0).round()) / 100.0,
+                    samples: jh.len() as usize,
+                })
+            } else {
+                None
+            }
+        });
+        let jitter_samples = jitter_ms.as_ref().map(|j| j.samples).unwrap_or(0);
 
         let sla = SlaReport {
             passed: slo_passed,
@@ -295,6 +379,7 @@ impl BenchmarkReport {
             target,
             metrics,
             latency_ms,
+            jitter_ms,
             sla,
             broker: args.broker.clone(),
             port: args.port,
@@ -322,6 +407,8 @@ impl BenchmarkReport {
             latency_p95_ms: p95_ms,
             latency_p99_ms: p99_ms,
             latency_max_ms: max_ms,
+            dropped_packets,
+            jitter_samples,
         }
     }
 
@@ -343,24 +430,38 @@ impl BenchmarkReport {
         );
         if self.duration_secs > 0 && self.mode != Mode::Conn {
             println!(
-                "📊 Total {}: {} (Duration target: {}s, Malformed injected: {}, Failed clients: {}, Success rate: {:.2}%)",
+                "📊 Total {}: {} (Duration target: {}s, Malformed injected: {}, Dropped packets: {}, Failed clients: {}, Success rate: {:.2}%)",
                 action_label,
                 self.actual_sent,
                 self.duration_secs,
                 self.malformed_sent,
+                self.dropped_packets,
                 self.failed_clients,
                 self.success_rate * 100.0
             );
         } else {
             println!(
-                "📊 Total {}: {} / {} (Malformed injected: {}, Failed clients: {}, Success rate: {:.2}%)",
+                "📊 Total {}: {} / {} (Malformed injected: {}, Dropped packets: {}, Failed clients: {}, Success rate: {:.2}%)",
                 action_label,
                 self.actual_sent,
                 self.target_messages,
                 self.malformed_sent,
+                self.dropped_packets,
                 self.failed_clients,
                 self.success_rate * 100.0
             );
+        }
+        if self.dropped_packets > 0 || self.jitter_ms.is_some() {
+            println!(
+                "🎲 Chaos / Network Faults: Dropped Packets: {} ({:.2}%)",
+                self.dropped_packets, self.metrics.drop_rate_percent
+            );
+            if let Some(ref j) = self.jitter_ms {
+                println!(
+                    "   Jitter (ms): min={:.2} | avg={:.2} | p50={:.2} | p90={:.2} | p95={:.2} | p99={:.2} | max={:.2} (samples: {})",
+                    j.min, j.avg, j.p50, j.p90, j.p95, j.p99, j.max, j.samples
+                );
+            }
         }
         if self.elapsed_secs > 0.0 {
             let unit = if self.mode == Mode::Conn {
@@ -424,6 +525,13 @@ impl BenchmarkReport {
         out.push_str(&format!(
             "mqtt_sniper_failure_count {}\n",
             self.metrics.failure_count
+        ));
+
+        out.push_str("# HELP mqtt_sniper_dropped_packets Dropped packets due to chaos network fault injection\n");
+        out.push_str("# TYPE mqtt_sniper_dropped_packets counter\n");
+        out.push_str(&format!(
+            "mqtt_sniper_dropped_packets {}\n",
+            self.metrics.dropped_packets
         ));
 
         out.push_str("# HELP mqtt_sniper_success_rate_percent Success rate percentage\n");
@@ -495,6 +603,24 @@ impl BenchmarkReport {
             "mqtt_sniper_sla_passed {}\n",
             if self.sla.passed { 1 } else { 0 }
         ));
+
+        if let Some(ref j) = self.jitter_ms {
+            out.push_str("# HELP mqtt_sniper_jitter_samples Total jitter samples recorded\n");
+            out.push_str("# TYPE mqtt_sniper_jitter_samples counter\n");
+            out.push_str(&format!("mqtt_sniper_jitter_samples {}\n", j.samples));
+
+            out.push_str("# HELP mqtt_sniper_jitter_avg_ms Average jitter delay in milliseconds\n");
+            out.push_str("# TYPE mqtt_sniper_jitter_avg_ms gauge\n");
+            out.push_str(&format!("mqtt_sniper_jitter_avg_ms {:.2}\n", j.avg));
+
+            out.push_str("# HELP mqtt_sniper_jitter_p50_ms P50 jitter delay in milliseconds\n");
+            out.push_str("# TYPE mqtt_sniper_jitter_p50_ms gauge\n");
+            out.push_str(&format!("mqtt_sniper_jitter_p50_ms {:.2}\n", j.p50));
+
+            out.push_str("# HELP mqtt_sniper_jitter_p95_ms P95 jitter delay in milliseconds\n");
+            out.push_str("# TYPE mqtt_sniper_jitter_p95_ms gauge\n");
+            out.push_str(&format!("mqtt_sniper_jitter_p95_ms {:.2}\n", j.p95));
+        }
 
         out
     }

@@ -1,11 +1,12 @@
 use super::pacer::Pacer;
 use super::stats::{RunnerStats, extract_payload_latency_us};
-use crate::cli::{Mode, parse_qos};
-use crate::payload::build_payload_with_chaos;
+use crate::cli::{Mode, PayloadFormat, parse_qos};
+use crate::payload::{build_payload_formatted_with_chaos, should_drop_packet};
 use indicatif::ProgressBar;
 use rumqttc::{AsyncClient, Event, MqttOptions, Outgoing, Packet, QoS, Transport};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::sync::{Semaphore, mpsc, watch};
 use tokio::time::Instant;
@@ -32,8 +33,12 @@ pub struct ClientSpawnContext {
     pub payload_template: String,
     /// Minimum padded payload size in bytes
     pub payload_size: usize,
+    /// Serialization payload format (JSON, Protobuf, Avro, Raw)
+    pub payload_format: PayloadFormat,
     /// Fraction of messages to corrupt for chaos/DLQ testing
     pub malformed_rate: f64,
+    /// Fraction of messages to drop before socket transmission
+    pub packet_drop: f64,
     /// Number of messages to publish/receive per client
     pub messages: usize,
     /// Soak test duration in seconds (0 = message-count mode)
@@ -76,7 +81,9 @@ pub async fn run_client_v3(ctx: ClientSpawnContext) {
         topic,
         payload_template,
         payload_size,
+        payload_format,
         malformed_rate,
+        packet_drop,
         messages,
         duration_secs,
         retain,
@@ -122,6 +129,11 @@ pub async fn run_client_v3(ctx: ClientSpawnContext) {
     let client_clone = client.clone();
     let (tx_time, mut rx_time) = mpsc::unbounded_channel::<Instant>();
 
+    let client_dropped = Arc::new(AtomicUsize::new(0));
+    let client_dropped_clone = Arc::clone(&client_dropped);
+    let worker_done = Arc::new(AtomicBool::new(false));
+    let worker_done_clone = Arc::clone(&worker_done);
+
     let stats_clone = stats.clone();
     let worker = tokio::spawn(async move {
         match mode {
@@ -130,7 +142,32 @@ pub async fn run_client_v3(ctx: ClientSpawnContext) {
                     let deadline = Instant::now() + Duration::from_secs(duration_secs);
                     let mut j = 0usize;
                     while Instant::now() < deadline && !*worker_shutdown.borrow() {
-                        let (payload_bytes, is_malformed) = build_payload_with_chaos(
+                        if pacer.jitter_ms > 0 {
+                            let jitter = pacer.calculate_jitter(device_id, j);
+                            stats_clone.record_jitter(device_id, jitter);
+                            if pacer
+                                .pace_jitter(jitter, Some(deadline), &mut worker_shutdown)
+                                .await
+                            {
+                                break;
+                            }
+                        }
+
+                        if packet_drop > 0.0 && should_drop_packet(packet_drop, device_id, j) {
+                            stats_clone.record_dropped();
+                            client_dropped_clone.fetch_add(1, Ordering::Relaxed);
+                            j += 1;
+                            if pacer
+                                .pace_interval(Some(deadline), &mut worker_shutdown)
+                                .await
+                            {
+                                break;
+                            }
+                            continue;
+                        }
+
+                        let (payload_bytes, is_malformed) = build_payload_formatted_with_chaos(
+                            payload_format,
                             &payload_template,
                             device_id,
                             j,
@@ -156,13 +193,34 @@ pub async fn run_client_v3(ctx: ClientSpawnContext) {
                             break;
                         }
                     }
+                    worker_done_clone.store(true, Ordering::Relaxed);
                     let _ = client.disconnect().await;
                 } else {
                     for j in 0..messages {
                         if *worker_shutdown.borrow() {
                             break;
                         }
-                        let (payload_bytes, is_malformed) = build_payload_with_chaos(
+                        if pacer.jitter_ms > 0 {
+                            let jitter = pacer.calculate_jitter(device_id, j);
+                            stats_clone.record_jitter(device_id, jitter);
+                            if pacer.pace_jitter(jitter, None, &mut worker_shutdown).await {
+                                break;
+                            }
+                        }
+
+                        if packet_drop > 0.0 && should_drop_packet(packet_drop, device_id, j) {
+                            stats_clone.record_dropped();
+                            client_dropped_clone.fetch_add(1, Ordering::Relaxed);
+                            if j + 1 < messages
+                                && pacer.pace_interval(None, &mut worker_shutdown).await
+                            {
+                                break;
+                            }
+                            continue;
+                        }
+
+                        let (payload_bytes, is_malformed) = build_payload_formatted_with_chaos(
+                            payload_format,
                             &payload_template,
                             device_id,
                             j,
@@ -185,7 +243,13 @@ pub async fn run_client_v3(ctx: ClientSpawnContext) {
                             break;
                         }
                     }
-                    if qos == QoS::AtMostOnce || messages == 0 || *worker_shutdown.borrow() {
+                    worker_done_clone.store(true, Ordering::Relaxed);
+                    let dropped = client_dropped_clone.load(Ordering::Relaxed);
+                    if qos == QoS::AtMostOnce
+                        || messages == 0
+                        || *worker_shutdown.borrow()
+                        || dropped >= messages
+                    {
                         let _ = client.disconnect().await;
                     }
                 }
@@ -198,8 +262,10 @@ pub async fn run_client_v3(ctx: ClientSpawnContext) {
                             _ = worker_shutdown.changed() => {}
                         }
                     }
+                    worker_done_clone.store(true, Ordering::Relaxed);
                     let _ = client.disconnect().await;
                 } else if messages == 0 {
+                    worker_done_clone.store(true, Ordering::Relaxed);
                     let _ = client.disconnect().await;
                 } else {
                     let _ = client.subscribe(topic.as_str(), qos).await;
@@ -211,6 +277,7 @@ pub async fn run_client_v3(ctx: ClientSpawnContext) {
                         _ = tokio::time::sleep(Duration::from_secs(duration_secs)) => {}
                         _ = worker_shutdown.changed() => {}
                     }
+                    worker_done_clone.store(true, Ordering::Relaxed);
                     let _ = client.disconnect().await;
                 }
             }
@@ -257,7 +324,8 @@ pub async fn run_client_v3(ctx: ClientSpawnContext) {
                             }
                             pb_clone.inc(1);
                             completed_count += 1;
-                            if duration_secs == 0 && completed_count == messages {
+                            let dropped = client_dropped.load(Ordering::Relaxed);
+                            if duration_secs == 0 && (completed_count + dropped >= messages) {
                                 let _ = client_clone.disconnect().await;
                             }
                         }
@@ -270,7 +338,8 @@ pub async fn run_client_v3(ctx: ClientSpawnContext) {
                             }
                             pb_clone.inc(1);
                             completed_count += 1;
-                            if duration_secs == 0 && completed_count == messages {
+                            let dropped = client_dropped.load(Ordering::Relaxed);
+                            if duration_secs == 0 && (completed_count + dropped >= messages) {
                                 let _ = client_clone.disconnect().await;
                             }
                         }
@@ -296,6 +365,14 @@ pub async fn run_client_v3(ctx: ClientSpawnContext) {
                         break;
                     }
                 }
+            }
+            _ = tokio::time::sleep(Duration::from_millis(100)), if worker_done.load(Ordering::Relaxed) && inflight.is_empty() => {
+                let _ = client_clone.disconnect().await;
+                break;
+            }
+            _ = tokio::time::sleep(Duration::from_secs(10)), if worker_done.load(Ordering::Relaxed) => {
+                let _ = client_clone.disconnect().await;
+                break;
             }
         }
     }

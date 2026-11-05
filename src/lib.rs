@@ -18,4 +18,5 @@ pub mod report;
 /// Client worker orchestration and load test runner.
 pub mod runner;
 
+pub use cli::{Args, Mode, OutputFormat, PayloadFormat};
 pub use error::{Result, SniperError};

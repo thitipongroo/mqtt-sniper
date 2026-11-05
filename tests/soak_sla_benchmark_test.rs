@@ -31,6 +31,9 @@ async fn test_live_soak_and_sla_benchmark() {
         keep_alive: 10,
         ramp_up_ms: 0,
         interval_ms: 0,
+        jitter_ms: 0,
+        packet_drop: 0.0,
+        payload_format: mqtt_sniper::cli::PayloadFormat::Json,
         payload:
             r#"{"device_id": {device_id}, "seq": {seq}, "ts": {timestamp}, "temp": {random_float}}"#
                 .to_string(),
@@ -110,6 +113,9 @@ async fn test_live_time_based_soak_benchmark() {
         keep_alive: 10,
         ramp_up_ms: 0,
         interval_ms: 1,
+        jitter_ms: 0,
+        packet_drop: 0.0,
+        payload_format: mqtt_sniper::cli::PayloadFormat::Json,
         payload: r#"{"id": {device_id}, "ts": {timestamp_secs}, "uuid": "{uuid}"}"#.to_string(),
         payload_file: None,
         payload_size: 0,

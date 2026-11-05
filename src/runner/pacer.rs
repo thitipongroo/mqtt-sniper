@@ -1,14 +1,17 @@
+use crate::payload::next_random_u64;
 use std::time::Duration;
 use tokio::sync::watch;
 use tokio::time::Instant;
 
-/// Controls pacing, ramp-up delays, and inter-message intervals for simulated clients.
+/// Controls pacing, ramp-up delays, inter-message intervals, and chaos jitter for simulated clients.
 #[derive(Debug, Clone, Copy)]
 pub struct Pacer {
     /// Delay between consecutive messages in milliseconds
     pub interval_ms: u64,
     /// Delay before spawning consecutive clients in milliseconds
     pub ramp_up_ms: u64,
+    /// Maximum random jitter delay in milliseconds (0 to N ms)
+    pub jitter_ms: u64,
 }
 
 impl Pacer {
@@ -17,6 +20,53 @@ impl Pacer {
         Self {
             interval_ms,
             ramp_up_ms,
+            jitter_ms: 0,
+        }
+    }
+
+    /// Create a new `Pacer` instance with random jitter configuration.
+    pub fn with_jitter(interval_ms: u64, ramp_up_ms: u64, jitter_ms: u64) -> Self {
+        Self {
+            interval_ms,
+            ramp_up_ms,
+            jitter_ms,
+        }
+    }
+
+    /// Calculate pseudo-random jitter delay in milliseconds in the range [0, jitter_ms].
+    pub fn calculate_jitter(&self, device_id: usize, seq: usize) -> u64 {
+        if self.jitter_ms == 0 {
+            return 0;
+        }
+        let seed = ((device_id as u64) << 32) ^ (seq as u64) ^ 0x9E37_79B9_7F4A_7C15;
+        next_random_u64(seed) % (self.jitter_ms + 1)
+    }
+
+    /// Wait for the calculated jitter delay.
+    /// Returns `true` if shutdown was signaled or deadline expired, `false` if completed normally.
+    pub async fn pace_jitter(
+        &self,
+        jitter_ms: u64,
+        deadline: Option<Instant>,
+        shutdown: &mut watch::Receiver<bool>,
+    ) -> bool {
+        if jitter_ms == 0 {
+            return false;
+        }
+
+        let sleep_dur = if let Some(dl) = deadline {
+            let remaining = dl.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return true;
+            }
+            Duration::from_millis(jitter_ms).min(remaining)
+        } else {
+            Duration::from_millis(jitter_ms)
+        };
+
+        tokio::select! {
+            _ = tokio::time::sleep(sleep_dur) => false,
+            _ = shutdown.changed() => true,
         }
     }
 
@@ -93,5 +143,22 @@ mod tests {
         let past = Instant::now() - Duration::from_millis(10);
         let expired = pacer.pace_interval(Some(past), &mut rx).await;
         assert!(expired);
+    }
+
+    #[tokio::test]
+    async fn test_pacer_jitter_calculation_and_pacing() {
+        let pacer = Pacer::with_jitter(10, 0, 50);
+        assert_eq!(pacer.jitter_ms, 50);
+
+        for seq in 0..100 {
+            let j = pacer.calculate_jitter(1, seq);
+            assert!(j <= 50, "Jitter {} must be <= 50", j);
+        }
+
+        let (_tx, mut rx) = watch::channel(false);
+        let start = Instant::now();
+        let cancelled = pacer.pace_jitter(20, None, &mut rx).await;
+        assert!(!cancelled);
+        assert!(start.elapsed() >= Duration::from_millis(15));
     }
 }

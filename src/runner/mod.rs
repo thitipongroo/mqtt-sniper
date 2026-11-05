@@ -128,7 +128,7 @@ pub async fn run_load_test(mut args: Args) -> Result<BenchmarkReport> {
         None
     };
 
-    let pacer = Pacer::new(args.interval_ms, args.ramp_up_ms);
+    let pacer = Pacer::with_jitter(args.interval_ms, args.ramp_up_ms, args.jitter_ms);
 
     for i in 0..args.clients {
         if *shutdown_tx.borrow() {
@@ -153,7 +153,9 @@ pub async fn run_load_test(mut args: Args) -> Result<BenchmarkReport> {
             topic: args.topic.replace("{device_id}", &device_id_str),
             payload_template: resolved_payload.clone(),
             payload_size: args.payload_size,
+            payload_format: args.payload_format,
             malformed_rate: args.malformed_rate,
+            packet_drop: args.packet_drop,
             messages: args.messages,
             duration_secs: args.duration_secs,
             retain: args.retain,
@@ -200,7 +202,22 @@ pub async fn run_load_test(mut args: Args) -> Result<BenchmarkReport> {
     let elapsed = start_time.elapsed();
     let (actual_sent, malformed_sent, errors) = stats.snapshot();
 
-    let report = BenchmarkReport::new(&args, elapsed, actual_sent, malformed_sent, errors, &hist);
+    let jitter_hist = if stats.jitter_samples() > 0 {
+        Some(stats.merge_jitter_histogram())
+    } else {
+        None
+    };
+
+    let report = BenchmarkReport::with_chaos(
+        &args,
+        elapsed,
+        actual_sent,
+        malformed_sent,
+        errors,
+        stats.dropped_packets(),
+        &hist,
+        jitter_hist.as_ref(),
+    );
 
     match args.output {
         OutputFormat::Text => {

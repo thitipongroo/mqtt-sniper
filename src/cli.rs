@@ -30,6 +30,21 @@ pub enum OutputFormat {
     Prometheus,
 }
 
+/// Payload serialization format
+#[derive(ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PayloadFormat {
+    /// Standard JSON format with dynamic templating
+    #[default]
+    Json,
+    /// Protocol Buffers compact binary wire format
+    Protobuf,
+    /// Apache Avro compact binary stream format
+    Avro,
+    /// Raw unformatted binary or text stream
+    Raw,
+}
+
 /// CLI argument parsing structure
 #[derive(Parser, Debug, Clone)]
 #[command(author, version, about = "Blazing fast MQTT Load Tester")]
@@ -101,6 +116,18 @@ pub struct Args {
     /// Delay (ms) between consecutive messages from the same client
     #[arg(short, long, default_value_t = 0)]
     pub interval_ms: u64,
+
+    /// Random delay (0 to N ms) added to each published message to simulate network latency jitter
+    #[arg(long, default_value_t = 0)]
+    pub jitter_ms: u64,
+
+    /// Fraction of published messages (0.0 to 1.0) to drop before sending to simulate packet loss
+    #[arg(long, default_value_t = 0.0)]
+    pub packet_drop: f64,
+
+    /// Payload serialization format: 'json', 'protobuf', 'avro', or 'raw'
+    #[arg(long, value_enum, default_value_t = PayloadFormat::Json)]
+    pub payload_format: PayloadFormat,
 
     /// Custom payload template (supports {device_id}, {seq}, {timestamp}, {timestamp_secs}, {timestamp_us}, {random_int}, {random_float}, {random_bool}, {uuid})
     #[arg(
@@ -241,6 +268,13 @@ pub fn resolve_payload_template(args: &Args) -> Result<String> {
         return Err(SniperError::Payload(format!(
             "--malformed-rate must be between 0.0 and 1.0 (got {})",
             args.malformed_rate
+        )));
+    }
+
+    if !(0.0..=1.0).contains(&args.packet_drop) {
+        return Err(SniperError::Payload(format!(
+            "--packet-drop must be between 0.0 and 1.0 (got {})",
+            args.packet_drop
         )));
     }
 
@@ -457,6 +491,9 @@ mod tests {
         assert_eq!(args.keep_alive, 5);
         assert_eq!(args.ramp_up_ms, 0);
         assert_eq!(args.interval_ms, 0);
+        assert_eq!(args.jitter_ms, 0);
+        assert!((args.packet_drop - 0.0).abs() < f64::EPSILON);
+        assert_eq!(args.payload_format, PayloadFormat::Json);
         assert_eq!(
             args.payload,
             r#"{"device_id": {device_id}, "seq": {seq}, "ts": {timestamp}}"#
@@ -515,6 +552,12 @@ mod tests {
             "5",
             "-i",
             "10",
+            "--jitter-ms",
+            "50",
+            "--packet-drop",
+            "0.15",
+            "--payload-format",
+            "protobuf",
             "--payload",
             r#"{"id": {device_id}}"#,
             "--payload-file",
@@ -563,6 +606,9 @@ mod tests {
         assert_eq!(args.keep_alive, 30);
         assert_eq!(args.ramp_up_ms, 5);
         assert_eq!(args.interval_ms, 10);
+        assert_eq!(args.jitter_ms, 50);
+        assert!((args.packet_drop - 0.15).abs() < f64::EPSILON);
+        assert_eq!(args.payload_format, PayloadFormat::Protobuf);
         assert_eq!(args.payload, r#"{"id": {device_id}}"#);
         assert_eq!(args.payload_file, Some("template.json".to_string()));
         assert_eq!(args.payload_size, 64);
@@ -631,6 +677,15 @@ mod tests {
         assert!(resolve_payload_template(&args).is_err());
 
         args.malformed_rate = 0.05;
+        assert!(resolve_payload_template(&args).is_ok());
+
+        args.packet_drop = -0.01;
+        assert!(resolve_payload_template(&args).is_err());
+        args.packet_drop = 1.05;
+        assert!(resolve_payload_template(&args).is_err());
+        args.packet_drop = 0.20;
+        assert!(resolve_payload_template(&args).is_ok());
+
         args.min_success_rate = Some(1.2);
         assert!(resolve_payload_template(&args).is_err());
 
